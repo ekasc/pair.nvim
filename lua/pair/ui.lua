@@ -175,7 +175,7 @@ end
 
 function Ui:render()
   if not self:is_open() or not vim.api.nvim_buf_is_valid(self.transcript_buf) then return end
-  local lines = { "PAIR  ·  <C-s> send  ·  <C-t> steer  ·  :PairChanges files", "" }
+  local lines = { "PAIR  ·  <C-s> send  ·  <C-t> steer  ·  :PairChanges  ·  :PairGroups", "" }
   local targets = {}
   for _, entry in ipairs(self.entries) do
     local heading = ({ user = "You", agent = "Agent", decision = "Decision", files = "Files", status = "Status", error = "Error", tool = "Tool" })[entry.role] or entry.role

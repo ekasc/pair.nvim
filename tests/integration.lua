@@ -5,9 +5,10 @@
 --   nvim --headless -l tests/integration.lua
 --
 -- Covers: session start, the one-time directive, streamed assistant text,
--- decision records with linked files, tool-boundary change observation,
--- silent reload of an unmodified buffer, refusal to overwrite a modified one,
--- and restoration of the buffer option the observer borrows.
+-- decision records with linked files, tool-boundary change observation, change
+-- groups arranged under the decisions that name their files, silent reload of an
+-- unmodified buffer, refusal to overwrite a modified one, and restoration of the
+-- buffer option the observer borrows.
 
 local root = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(root)
@@ -145,6 +146,40 @@ if has_git then
   vim.cmd("cclose")
   check("quickfix points at the changed line", quickfix[1] and quickfix[1].lnum == 2, vim.inspect(quickfix[1]))
 
+  -- Multi-file change groups: the same evidence arranged under the decision that
+  -- names each file, instead of a run of unrelated files. A manual window brings
+  -- in a file no decision names, which is the bucket the view must not hide.
+  local scratch = tmp .. "/scratch.lua"
+  session.changes:before("manual-2")
+  local scratch_handle = assert(io.open(scratch, "wb"))
+  scratch_handle:write("scratch\n")
+  scratch_handle:close()
+  session.changes:after("manual-2")
+  local scratch_buf = vim.fn.bufadd(scratch)
+  pair.groups()
+  local grouped = vim.fn.getqflist()
+  vim.cmd("cclose")
+  local headers, grouped_items, separate = {}, {}, {}
+  for _, item in ipairs(grouped) do
+    if item.valid == 0 then
+      headers[#headers + 1] = item.text
+    elseif item.bufnr == scratch_buf then
+      separate[#separate + 1] = item
+    else
+      grouped_items[#grouped_items + 1] = item
+    end
+  end
+  check("a change group names the decision that holds its file",
+    headers[1] ~= nil and headers[1]:find("Round 1 decision", 1, true) ~= nil
+      and headers[1]:find("1 file, 1 hunk", 1, true) ~= nil, headers[1])
+  check("a group item points at the line its hunk covers",
+    grouped_items[1] ~= nil and grouped_items[1].bufnr == vim.fn.bufnr(generated) and grouped_items[1].lnum == 2,
+    vim.inspect(grouped_items[1]))
+  check("observed changes no decision names are listed apart",
+    #headers == 2 and headers[2]:find("no decision", 1, true) ~= nil
+      and #separate == 1 and separate[1].text == "first reading of this file",
+    table.concat(headers, " / ") .. " separate: " .. #separate)
+
   -- A byte-order mark lives in an option rather than in the first line, so a
   -- buffer holding a file that has one only matches if the comparison puts it
   -- back before hashing. Real buffer, real option, no stub involved.
@@ -213,6 +248,22 @@ if has_git then
     first and tostring(first.bindings["gen.lua"].revision))
   check("marks for a superseded revision are cleared from the unsaved buffer",
     #vim.api.nvim_buf_get_extmarks(genbuf, require("pair.marks").namespace(), 0, -1, {}) == 0)
+
+  -- The group view follows the binding: the round-one decision is marked, and the
+  -- reading under it is the one round two wrote.
+  pair.groups()
+  local stale_groups = vim.fn.getqflist()
+  vim.cmd("cclose")
+  local stale_item
+  for _, item in ipairs(stale_groups) do
+    if item.valid == 1 and item.bufnr == vim.fn.bufnr(generated) then stale_item = item break end
+  end
+  check("a group says how much of its evidence is superseded",
+    stale_groups[1] ~= nil and stale_groups[1].text:find("1 superseded", 1, true) ~= nil,
+    stale_groups[1] and stale_groups[1].text)
+  check("a superseded item says which decision it no longer matches",
+    stale_item ~= nil and stale_item.text:find("changed since the decision", 1, true) ~= nil,
+    stale_item and stale_item.text)
 else
   print("SKIP unsaved-buffer guard: git is not installed")
 end
@@ -273,6 +324,18 @@ if has_git then
   end
   check("the quickfix reports the removal without inventing a diff",
     removed_item and removed_item.text == "no longer on disk", removed_item and removed_item.text)
+
+  -- An absent file's own reading already says it is absent, so the group item for
+  -- it does not say so twice.
+  pair.groups()
+  local gone_groups = vim.fn.getqflist()
+  vim.cmd("cclose")
+  local gone_group_item
+  for _, item in ipairs(gone_groups) do
+    if item.bufnr == vim.fn.bufnr(generated) then gone_group_item = item break end
+  end
+  check("a group item for an absent file reports the absence once",
+    gone_group_item ~= nil and gone_group_item.text == "no longer on disk", gone_group_item and gone_group_item.text)
 else
   print("SKIP removal observation: git is not installed")
 end

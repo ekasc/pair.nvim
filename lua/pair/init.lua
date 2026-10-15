@@ -127,26 +127,92 @@ local function hunk_text(hunk)
   return ("%d changed line%s"):format(hunk.new_count, hunk.new_count == 1 and "" or "s")
 end
 
+local function plural(count, singular)
+  return ("%d %s%s"):format(count, singular, count == 1 and "" or "s")
+end
+
+-- Items for one file: one per hunk, so each is a jump target, or a single item
+-- saying what the reading knows when there is no diff to point at.
+local function add_file_items(items, root, path, entry, note)
+  local filename = root .. "/" .. path
+  if not entry then
+    -- A decision may name a file no observation has covered. There is no reading
+    -- to point at, so the item says that instead of offering a location.
+    items[#items + 1] = { filename = filename, lnum = 0, valid = 0, text = "no observation has covered this file" }
+    return
+  end
+  if #entry.hunks == 0 then
+    items[#items + 1] = { filename = filename, lnum = 1, text = item_text(entry) .. note }
+    return
+  end
+  for _, hunk in ipairs(entry.hunks) do
+    items[#items + 1] = { filename = filename, lnum = math.max(hunk.new_start or 1, 1), text = hunk_text(hunk) .. note }
+  end
+end
+
+-- A group item's standing relative to the decision that named the file. The item
+-- text already reports an absent file, so the note is added only when it says
+-- something that text does not.
+local function file_note(file)
+  if file.superseded then return "  (changed since the decision)" end
+  -- A binding exists only for an observed path, so the reading behind it exists.
+  if file.gone and file.entry.status ~= "gone" then return "  (file gone)" end
+  return ""
+end
+
+-- What a group holds: the files the decision named, the hunks their readings
+-- cover, and how much of that evidence no longer matches the decision.
+local function group_header(group)
+  local hunks, superseded, gone, unobserved = 0, 0, 0, 0
+  for _, file in ipairs(group.files) do
+    hunks = hunks + (file.entry and #file.entry.hunks or 0)
+    if file.superseded then superseded = superseded + 1 end
+    if file.gone then gone = gone + 1 end
+    if not file.entry then unobserved = unobserved + 1 end
+  end
+  local text = ("[decision] %s - %s, %s"):format(group.title, plural(#group.files, "file"), plural(hunks, "hunk"))
+  if superseded > 0 then text = text .. ", " .. superseded .. " superseded" end
+  if gone > 0 then text = text .. ", " .. gone .. " gone" end
+  if unobserved > 0 then text = text .. ", " .. unobserved .. " not observed" end
+  return text
+end
+
 function M.changes()
   if not M.session then return end
   local entries = M.session:file_entries()
   if #entries == 0 then return notify("No observed changed files yet") end
   local items = {}
   for _, entry in ipairs(entries) do
-    local filename = M.session.root .. "/" .. entry.path
-    if #entry.hunks == 0 then
-      items[#items + 1] = { filename = filename, lnum = 1, text = item_text(entry) }
-    else
-      for _, hunk in ipairs(entry.hunks) do
-        items[#items + 1] = {
-          filename = filename,
-          lnum = math.max(hunk.new_start or 1, 1),
-          text = hunk_text(hunk),
-        }
-      end
-    end
+    add_file_items(items, M.session.root, entry.path, entry, "")
   end
   vim.fn.setqflist({}, "r", { title = "Pair observed changes", items = items })
+  vim.cmd("copen")
+end
+
+-- The same evidence as :PairChanges, arranged under the decisions that name the
+-- files, so one implementation decision reads as one unit instead of as a run of
+-- unrelated files. A group label is not a location, so headers are text-only
+-- entries.
+function M.groups()
+  if not M.session then return end
+  local groups, unclaimed = M.session:groups()
+  if #groups == 0 and #unclaimed == 0 then return notify("No observed changed files yet") end
+  local items = {}
+  for _, group in ipairs(groups) do
+    items[#items + 1] = { text = group_header(group), valid = 0 }
+    for _, file in ipairs(group.files) do
+      add_file_items(items, M.session.root, file.path, file.entry, file_note(file))
+    end
+  end
+  if #unclaimed > 0 then
+    local hunks = 0
+    for _, file in ipairs(unclaimed) do hunks = hunks + #file.entry.hunks end
+    items[#items + 1] = { text = ("[no decision] observed changes - %s, %s"):format(plural(#unclaimed, "file"), plural(hunks, "hunk")), valid = 0 }
+    for _, file in ipairs(unclaimed) do
+      add_file_items(items, M.session.root, file.path, file.entry, "")
+    end
+  end
+  vim.fn.setqflist({}, "r", { title = "Pair change groups", items = items })
   vim.cmd("copen")
 end
 
@@ -165,6 +231,7 @@ function M.setup(options)
     PairFollow = M.follow,
     PairInterrupt = M.interrupt,
     PairChanges = M.changes,
+    PairGroups = M.groups,
   }
   for name, callback in pairs(commands) do
     vim.api.nvim_create_user_command(name, callback, {})

@@ -349,6 +349,67 @@ test("a tool event without an id is reported instead of raised", function()
   assert(reported.text:find("without an id", 1, true), reported.text)
 end)
 
+test("observed changes are grouped under the decisions that name their files", function()
+  local GroupsReal = dofile(root .. "/lua/pair/groups.lua")
+  local log = {
+    ["src/a.lua"] = { path = "src/a.lua", status = "changed", key = "rev-2", revision = "rev-2", hunks = { { new_start = 3, new_count = 1 } } },
+    ["src/stray.lua"] = { path = "src/stray.lua", status = "new", key = "rev-3", revision = "rev-3", hunks = {} },
+    ["zz.lua"] = { path = "zz.lua", status = "changed", key = "rev-4", revision = "rev-4", hunks = {} },
+  }
+  local decisions = {
+    { title = "Atomic updates", files = { "src/a.lua", "src/never.lua" },
+      bindings = { ["src/a.lua"] = { key = "rev-1", revision = "rev-1", revised = true } } },
+    { title = "Queueing", files = { "src/a.lua" },
+      bindings = { ["src/a.lua"] = { key = "rev-2", revision = "rev-2" } } },
+    { title = "Nothing to place", files = {} },
+  }
+  local groups, unclaimed = GroupsReal.build(decisions, log)
+  -- A decision that names no files holds no change, so it is not a change group.
+  assert(#groups == 2, "groups: " .. #groups)
+  assert(groups[1].title == "Atomic updates", tostring(groups[1].title))
+  -- One file can be named by more than one decision. Each group reports it and
+  -- reports its own binding for it rather than a shared verdict.
+  assert(#groups[1].files == 2 and #groups[2].files == 1, "files per group")
+  assert(groups[1].files[1].entry == log["src/a.lua"], "the group refers to the reading itself")
+  assert(groups[1].files[1].superseded == true, "the mark of the decision that moved")
+  assert(groups[2].files[1].superseded == false, "a decision still bound to the current reading")
+  assert(groups[1].files[2].entry == nil, "a file no observation covered is listed as such")
+  assert(groups[1].files[2].superseded == false, "and nothing is claimed about it")
+  -- An observed path no decision names is listed apart, in path order, so a view
+  -- built on groups does not hide it.
+  assert(#unclaimed == 2, "unclaimed: " .. #unclaimed)
+  assert(unclaimed[1].path == "src/stray.lua" and unclaimed[2].path == "zz.lua",
+    unclaimed[1].path .. "," .. unclaimed[2].path)
+  assert(unclaimed[1].superseded == false and unclaimed[1].gone == false, "no decision binds an unclaimed path")
+end)
+
+test("a decision labels the group of changes it names", function()
+  entries = {}
+  local session = Session.new("/repo", Config.options)
+  session.file_log["src/a.lua"] = { path = "src/a.lua", status = "changed", key = "rev-1", revision = "rev-1",
+    hunks = { { new_start = 2, new_count = 1 } } }
+  session.file_log["src/stray.lua"] = { path = "src/stray.lua", status = "new", key = "rev-2", revision = "rev-2", hunks = {} }
+  session:on_event("event", {
+    type = "message_end",
+    message = { role = "assistant", content = { { type = "text",
+      text = "Implemented.\nPAIR_DECISION: Atomic updates | Prevent competing writes | src/a.lua, src/never.lua" } } },
+  })
+  local groups, unclaimed = session:groups()
+  assert(#groups == 1 and #unclaimed == 1, "groups: " .. #groups .. " unclaimed: " .. #unclaimed)
+  assert(groups[1].title == "Atomic updates", "the label is the title, not the entry body: " .. tostring(groups[1].title))
+  assert(groups[1].files[1].entry == session.file_log["src/a.lua"], "the group shows the reading the log holds")
+  assert(groups[1].files[2].entry == nil, "a decision may name a file nothing observed")
+  assert(unclaimed[1].path == "src/stray.lua", tostring(unclaimed[1].path))
+  assert(#session:decisions() == 1, "the transcript holds one decision")
+  assert(groups[1].files[1].superseded == false, "nothing is marked before a second reading")
+  -- What a group reports about staleness is the binding's mark, so a view built
+  -- from it follows the observations instead of freezing at decision time.
+  entries[#entries].bindings["src/a.lua"].revised = true
+  local moved = session:groups()
+  assert(moved[1].files[1].superseded == true, "the moved reading is reported")
+  assert(moved[1].files[2].superseded == false, "only the bound file is marked")
+end)
+
 -- Exercise the actual NUL-delimited Git scanner using synthetic status output
 -- and real file contents, without requiring Neovim or a Git repository.
 test("multi-file scanner handles dirty edits, untracked spaces, renames", function()

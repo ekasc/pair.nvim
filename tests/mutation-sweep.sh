@@ -100,6 +100,12 @@ run_one "marks leave a buffer holding another revision" lua/pair/session.lua \
   's/    Marks\.clear\(bufnr\)\n    return/    -- cleared\n    return/' "$INTEG"
 run_one "the revised mark clears" lua/pair/ui.lua \
   's/      binding\.revised = \(binding\.key ~= nil and key ~= nil and binding\.key ~= key\) or false/      binding.revised = binding.revised or (binding.key ~= nil and key ~= nil and binding.key ~= key) or false/' "$LOGIC"
+run_one "a group shows the reading it points at" lua/pair/groups.lua \
+  's/        group\.files\[#group\.files \+ 1\] = Groups\.file\(path, file_log\[path\], decision\.bindings and decision\.bindings\[path\]\)/        group.files[#group.files + 1] = Groups.file(path, nil, decision.bindings and decision.bindings[path])/' "$LOGIC"
+run_one "a group lists paths no decision names" lua/pair/groups.lua \
+  's/    if not claimed\[path\] then unclaimed\[#unclaimed \+ 1\] = Groups\.file\(path, entry, nil\) end/    if false then unclaimed[#unclaimed + 1] = Groups.file(path, entry, nil) end/' "$INTEG"
+run_one "a group reports superseded evidence" lua/pair/groups.lua \
+  's/    superseded = binding ~= nil and binding\.revised == true/    superseded = false/' "$INTEG"
 
 rm -rf "$work"
 if command -v git >/dev/null 2>&1 && [ "$(git status --porcelain)" != "$state_before" ]; then

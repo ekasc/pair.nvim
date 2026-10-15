@@ -16,6 +16,7 @@ Session controller ────────── Pi RPC (JSONL over stdin/stdou
       ◀────────────────────────────┘
       │
       ├── UI timeline: chat, decisions, linked paths
+      ├── Views over the evidence: :PairChanges by file, :PairGroups by decision
       └── Change observer: Git working tree checkpoints + reload unmodified buffers
 ```
 
@@ -60,9 +61,15 @@ A file leaving the changed set is not assumed to be gone: reading it separates a
 
 Hunk ranges would go stale as later edits move code, so they are never reused across observations. Instead an explanation records the change key of each file it names, and a later observation at a different key marks that explanation as changed since. The bound revision is kept as written, so the transcript keeps saying both what was explained and what has happened to it since. The mark is a comparison rather than a latch: a file that comes back to the explained key stops being marked.
 
+### Change groups
+
+`lua/pair/groups.lua` joins the two records into one view. A change group is one stated decision plus the files it names, each shown with the reading it was last observed at. The group holds no state of its own: it refers to the observation entry rather than copying it, so it cannot drift from the reading it points at, and it reports the decision's binding as superseded or gone instead of deciding staleness a second time. The decision's title is kept as a field of the transcript entry for this, because the entry body is the rationale a reader sees and a group header needs the label alone.
+
+A group header says what the group holds: files, hunks, and how much of that evidence no longer matches the decision. An item for a file whose binding moved carries that mark, so a hunk listed under a decision is not read as the reading that decision described. A file no observation covered is listed with that fact, because a decision naming a file nothing measured is a gap worth seeing, and it offers no location to jump to, since nothing at it was measured. Observed paths no decision names are listed in a final section rather than dropped, so this view never hides a change it cannot place. The transcript is capped, so a decision the entry cap has pruned stops naming its files, and those files fall into that final section.
+
 ### Still wanted
 
-Grouping observations into a durable object, and recording verification:
+A change group that outlives the session it was formed in, and records of verification:
 
 ```text
 ChangeGroup {
@@ -74,7 +81,7 @@ ChangeGroup {
 }
 ```
 
-This must remain a *view* over real file and tool evidence. An agent-provided path should never be silently treated as proof of modification. Untracked files, renames and unrelated user edits are handled only at the level of "this file looked different across the tool boundary", which is why a status reports what was measured rather than what it is taken to mean.
+The view above is built on demand from the transcript and the observation log, and both live in memory for one session, so a group lasts exactly as long as the transcript that names its decision. Persisting it, and recording what a verification command actually printed, are the parts still missing. Either one must remain a *view* over real file and tool evidence. An agent-provided path should never be silently treated as proof of modification. Untracked files, renames and unrelated user edits are handled only at the level of "this file looked different across the tool boundary", which is why a status reports what was measured rather than what it is taken to mean.
 
 ## Protocol baseline
 
@@ -101,7 +108,7 @@ Upstream references:
 - A tool end with no recorded start, or one whose checkpoint was dropped past the bound of 8 outstanding windows, is reported as unobserved rather than compared against an older baseline, which would credit one tool with another's edits.
 - A tool event without an id cannot be paired with its end, so no window is opened for it and the transcript says so instead of raising inside the event callback.
 - Between a reader being told a file is gone and another window reporting its path, the transcript keeps saying gone. A restore that happens outside every tool window, such as a `git checkout` between turns, is invisible to the observer, which only compares the start of a window with its end.
-- Git dirtiness is not equivalent to provenance. A user edit occurring during the tool window can be observed too.
+- Git dirtiness is not equivalent to provenance. A user edit occurring during the tool window can be observed too. A change group is a join on the names a decision states, which is the only link available: a file is grouped because it was named, not because the edit in it is known to be the agent's, and a path the model wrote wrongly groups whatever is at that path. A decision the entry cap has pruned stops naming its files, and they appear under observed changes no decision names.
 - Existing non-Git workspaces are not tracked. Git worktrees with `.git` files are recognized for root discovery.
 - Full-file writes may be atomic; file system watchers won't necessarily provide each intermediate line. The intended UX is revision-level diff streaming plus explanations, not simulated keystrokes.
 - Model-provided decision lines are best-effort output, not a guaranteed machine contract; output should be validated before presenting hard provenance.
@@ -112,7 +119,7 @@ Upstream references:
 ## Test strategy
 
 1. Portable isolated module tests: JSONL fragmentation, id correlation, follow-up vs steer, decision parsing including pipes inside rationale, first-turn directive, file scanning including renames and spaces, and degraded observation when Git is unavailable.
-2. Neovim headless integration with a fake Pi process (`tests/integration.lua`): sidebar open, expected chat lines, one-time directive, tool-boundary change observation with hunk offsets and changed-line marks, revision binding and staleness, a real commit that must not mark an explanation, a real removal that must, silent reload versus modified-buffer refusal, option restoration, and shutdown. Extension dialogs and follow mode are not yet covered.
+2. Neovim headless integration with a fake Pi process (`tests/integration.lua`): sidebar open, expected chat lines, one-time directive, tool-boundary change observation with hunk offsets and changed-line marks, revision binding and staleness, change groups with their decision headers, their superseded evidence and the section for observed changes no decision names, a real commit that must not mark an explanation, a real removal that must, silent reload versus modified-buffer refusal, option restoration, and shutdown. Extension dialogs and follow mode are not yet covered.
 3. Mutation checks (`tests/mutation-sweep.sh`) patch one fixed behaviour at a time and require the checks that cover it to fail, so the suite is known to be load-bearing rather than merely green. It fails when a patch does not apply, does not change the file, or leaves the checks passing, and it verifies that the repository state it started with is the state it left.
 4. Live Pi smoke test with a synthetic Git repo: design discussion, file edits, one follow-up, one steer, verification and stop.
 5. Visual interactive acceptance in Neovim: work in an unrelated buffer while agent edits, explore versus follow behavior, hunk navigation, restoring focus, and model/provider error recovery.

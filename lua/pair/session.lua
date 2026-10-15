@@ -2,6 +2,7 @@ local Pi = require("pair.pi")
 local Ui = require("pair.ui")
 local Changes = require("pair.changes")
 local Directive = require("pair.directive")
+local Groups = require("pair.groups")
 local Marks = require("pair.marks")
 
 local Session = {}
@@ -153,7 +154,10 @@ function Session:on_event(kind, event)
           }
         end
       end
-      self.ui:add("decision", decision.title .. "\n" .. decision.rationale, decision.files, bindings)
+      -- The rationale is the body a reader sees; the title is kept as its own
+      -- field so a view can label the decision without parsing that body.
+      local entry = self.ui:add("decision", decision.title .. "\n" .. decision.rationale, decision.files, bindings)
+      entry.title = decision.title
     end
     self.ui:request_render()
   elseif event.type == "tool_execution_start" then
@@ -324,6 +328,21 @@ function Session:file_entries()
   for _, entry in pairs(self.file_log) do entries[#entries + 1] = entry end
   table.sort(entries, function(a, b) return a.path < b.path end)
   return entries
+end
+
+-- The decisions stated in this session, oldest first. This reads the transcript,
+-- so a decision the entry cap has pruned is no longer named here.
+function Session:decisions()
+  local found = {}
+  for _, entry in ipairs(self.ui.entries) do
+    if entry.role == "decision" then found[#found + 1] = entry end
+  end
+  return found
+end
+
+-- Observed changes connected to the decisions that name their files.
+function Session:groups()
+  return Groups.build(self:decisions(), self.file_log)
 end
 
 return Session
