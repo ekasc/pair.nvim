@@ -147,8 +147,32 @@ if has_git then
 
   local first = decisions()[1]
   check("explanation is bound to the revision it describes",
-    first and first.revisions["gen.lua"] == round_one_revision,
-    first and tostring(first.revisions["gen.lua"]))
+    first and first.bindings["gen.lua"].revision == round_one_revision,
+    first and tostring(first.bindings["gen.lua"].revision))
+  check("the comparison uses the change key, not the published revision",
+    first and first.bindings["gen.lua"].key == round_one_revision)
+  check("the transcript shows the revision the explanation refers to",
+    wait_for("-> gen.lua  @" .. round_one_revision:sub(1, 8)))
+
+  -- A commit leaves the changed set without touching the bytes. Real repository,
+  -- real porcelain, driven on the tracker directly because no fake round needs to
+  -- change a file for this.
+  local committed = tmp .. "/observed.lua"
+  local handle = assert(io.open(committed, "wb"))
+  handle:write("local observed = 1\n")
+  handle:close()
+  vim.system({ "git", "-C", tmp, "add", "observed.lua" }):wait(5000)
+  session.changes:before("manual-1")
+  vim.system({ "git", "-C", tmp, "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-qm", "observe" }):wait(5000)
+  session.changes:after("manual-1")
+  local observed_entry = session.file_log["observed.lua"]
+  check("a commit is observed as leaving the changed set",
+    observed_entry and observed_entry.status == "unchanged", observed_entry and observed_entry.status)
+  check("a commit reports the revision its bytes still have",
+    observed_entry and observed_entry.revision == vim.fn.sha256("local observed = 1\n"),
+    observed_entry and tostring(observed_entry.revision))
+  check("a commit is reported in the file list", wait_for("-> observed.lua"))
+  check("a commit does not mark an explanation out of date", not transcript():find("(changed since)", 1, true))
 else
   print("SKIP change observation: git is not installed")
 end
@@ -164,8 +188,8 @@ if has_git then
   check("the earlier explanation is now marked stale", wait_for("(changed since)"))
   local first = decisions()[1]
   check("the bound revision is preserved, not rewritten",
-    first and first.revisions["gen.lua"] == round_one_revision,
-    first and tostring(first.revisions["gen.lua"]))
+    first and first.bindings["gen.lua"].revision == round_one_revision,
+    first and tostring(first.bindings["gen.lua"].revision))
   check("no marks are placed on a buffer that was not reloaded", #vim.api.nvim_buf_get_extmarks(genbuf, require("pair.marks").namespace(), 0, -1, {}) == 1)
 else
   print("SKIP unsaved-buffer guard: git is not installed")
@@ -181,7 +205,7 @@ local function occurrences(needle)
   return count
 end
 check("first prompt carries the directive", occurrences("PAIR_DECISION:") == 1, wire:sub(1, 200))
-check("both prompts reached Pi", occurrences('"type":"prompt"') == 2)
+check("both prompts so far reached Pi", occurrences('"type":"prompt"') == 2)
 
 -- open_file must report a refusal instead of throwing E37 when the target
 -- window holds unsaved changes. Neovim enables 'hidden' by default, so the
@@ -195,6 +219,41 @@ ui.origin_win = vim.api.nvim_get_current_win()
 session:open_file("gen.lua")
 check("refusal to abandon unsaved changes is reported, not thrown", wait_for("Refused to open gen.lua"))
 vim.o.hidden = hidden_before
+
+-- Round 3 removes the file. A removal is its own observation: no reading
+-- survives to compare against, so the transcript says the file is gone rather
+-- than claiming the explanation is out of date.
+prompt("Remove the file")
+release(3)
+if has_git then
+  check("a removal is reported in the file list", wait_for("Changes observed during tool call-3"))
+  check("an explanation naming the removed file says it is gone", wait_for("(file gone)"))
+  -- Nothing is left to read, so nothing may be published as a revision for it.
+  local removed = session.file_log["gen.lua"]
+  check("a removal publishes no reading at all",
+    removed and removed.status == "gone" and removed.revision == nil and removed.key == nil,
+    removed and ("status=" .. tostring(removed.status) .. " revision=" .. tostring(removed.revision) .. " key=" .. tostring(removed.key)))
+  check("no sentinel is rendered in place of a revision",
+    not transcript():find("<deleted>", 1, true) and not transcript():find("<non-file>", 1, true))
+  -- The earlier explanations are marked too, not only the new one that binds a
+  -- file already known to be absent.
+  local round_one = decisions()[1]
+  check("an earlier explanation is marked absent, not merely out of date",
+    round_one and round_one.bindings["gen.lua"].gone == true and round_one.bindings["gen.lua"].revised == false,
+    round_one and ("gone=" .. tostring(round_one.bindings["gen.lua"].gone) .. " revised=" .. tostring(round_one.bindings["gen.lua"].revised)))
+  check("the removal prompt reached Pi", occurrences('"type":"prompt"') == 3)
+  pair.changes()
+  local removed_qf = vim.fn.getqflist()
+  vim.cmd("cclose")
+  local removed_item
+  for _, item in ipairs(removed_qf) do
+    if item.bufnr == vim.fn.bufnr(generated) then removed_item = item end
+  end
+  check("the quickfix reports the removal without inventing a diff",
+    removed_item and removed_item.text == "no longer on disk", removed_item and removed_item.text)
+else
+  print("SKIP removal observation: git is not installed")
+end
 
 -- Teardown: closing stdin must end the process rather than leave it running.
 local backend = session.backend

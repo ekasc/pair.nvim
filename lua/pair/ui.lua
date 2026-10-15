@@ -123,23 +123,41 @@ function Ui:send(steer)
   end
 end
 
-function Ui:add(role, text, files, revisions)
-  local entry = { role = role, text = text or "", files = files or {}, revisions = revisions or {} }
+function Ui:add(role, text, files, bindings)
+  local entry = { role = role, text = text or "", files = files or {}, bindings = bindings or {} }
   self.entries[#self.entries + 1] = entry
   if #self.entries > self.options.max_entries then table.remove(self.entries, 1) end
   self:request_render()
   return entry
 end
 
--- Called when a file is observed at a new revision. Any explanation bound to a
--- different revision no longer describes what is on disk.
-function Ui:mark_stale(path, revision)
+-- Called when a file is observed at a new reading. An explanation bound to a
+-- different reading no longer describes what is on disk; one bound to the same
+-- reading is current again, so this both sets and clears the mark.
+function Ui:mark_revised(path, key)
   local marked = 0
   for _, entry in ipairs(self.entries) do
-    local bound = entry.revisions and entry.revisions[path]
-    if bound and bound ~= revision then
-      entry.stale = entry.stale or {}
-      entry.stale[path] = true
+    local binding = entry.bindings and entry.bindings[path]
+    if binding then
+      binding.gone = false
+      -- Two readings are needed to claim a file changed. With only one, nothing
+      -- can be said about whether the explanation still holds.
+      binding.revised = (binding.key ~= nil and key ~= nil and binding.key ~= key) or false
+      marked = marked + 1
+    end
+  end
+  return marked
+end
+
+-- Called when a file an explanation names is no longer on disk. There is no
+-- reading to compare, but the absence itself is a fact.
+function Ui:mark_gone(path)
+  local marked = 0
+  for _, entry in ipairs(self.entries) do
+    local binding = entry.bindings and entry.bindings[path]
+    if binding then
+      binding.gone = true
+      binding.revised = false
       marked = marked + 1
     end
   end
@@ -167,9 +185,15 @@ function Ui:render()
     end
     for _, file in ipairs(entry.files or {}) do
       local line = "  -> " .. file
-      local revision = entry.revisions and entry.revisions[file]
-      if revision then line = line .. "  @" .. revision:sub(1, 8) end
-      if entry.stale and entry.stale[file] then line = line .. "  (changed since)" end
+      local binding = entry.bindings and entry.bindings[file]
+      if binding then
+        -- Only a content hash is shown. A size and mtime fingerprint is a
+        -- change-detection key, and printing it as a revision was a claim the
+        -- observation could not support.
+        if binding.revision then line = line .. "  @" .. binding.revision:sub(1, 8) end
+        if binding.revised then line = line .. "  (changed since)" end
+        if binding.gone then line = line .. "  (file gone)" end
+      end
       lines[#lines + 1] = line
       targets[#lines] = file
     end

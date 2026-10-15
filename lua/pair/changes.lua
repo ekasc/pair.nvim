@@ -1,34 +1,44 @@
 local Changes = {}
 Changes.__index = Changes
 
--- A file larger than this is tracked by size and mtime instead of content, so
--- it gets a revision but no line-level hunks.
+-- A file larger than this is tracked by size and mtime instead of content. It
+-- gets no content revision and no line-level diff: reading it to hash it would
+-- cost as much memory as the file itself.
 local MAX_FILE_BYTES = 2 * 1024 * 1024
--- Total content a single checkpoint keeps in memory. Beyond this, files are
--- still hashed and still reported, they just cannot be diffed later.
+-- Total content a single checkpoint keeps so it can be diffed later. Files past
+-- the budget are still reported, with the reason their diff is missing.
 local MAX_CHECKPOINT_BYTES = 8 * 1024 * 1024
 -- A tool that never reports an end would otherwise pin its snapshot forever.
 local MAX_CHECKPOINTS = 8
 
-local function read_content(path)
+-- Returns the file's bytes, or nil plus why they are unavailable: "gone" when
+-- nothing is there, "not_a_file" for a directory or submodule, "too_large" past
+-- the ceiling, "unreadable" when a regular file cannot be opened.
+local function read_bytes(path)
   local stat = vim.uv.fs_stat(path)
-  if not stat or stat.type ~= "file" then return nil end
-  if stat.size > MAX_FILE_BYTES then return nil end
+  if not stat then return nil, "gone" end
+  if stat.type ~= "file" then return nil, "not_a_file" end
+  if stat.size > MAX_FILE_BYTES then return nil, "too_large" end
   local handle = io.open(path, "rb")
-  if not handle then return nil end
+  if not handle then return nil, "unreadable" end
   local bytes = handle:read("*a")
   handle:close()
-  return bytes
+  return bytes, nil
 end
 
+-- A change-detection key. It answers "did this file change", not "what is in
+-- it", so it is never published as a revision. Content that can be hashed gets
+-- its hash; a file past the ceiling gets a size and mtime fingerprint; anything
+-- that cannot be measured gets nothing.
 local function stat_key(path)
   local stat = vim.uv.fs_stat(path)
-  if not stat then return "<deleted>" end
-  if stat.type ~= "file" then return "<non-file>" end
+  if not stat or stat.type ~= "file" or stat.size <= MAX_FILE_BYTES then return nil end
   local mtime = stat.mtime or {}
   return table.concat({ stat.size, mtime.sec or 0, mtime.nsec or 0 }, ":")
 end
 
+-- Returns the changed paths plus a map from each rename's original path to its
+-- current one. Nil means git itself is unavailable.
 local function git_paths(root)
   -- Porcelain -z preserves whitespace and non-ASCII names. Renames carry a
   -- second NUL-delimited original path, which is not the current target.
@@ -41,6 +51,7 @@ local function git_paths(root)
   if result.code ~= 0 then return nil end
   local output = result.stdout or ""
   local paths = {}
+  local renamed = {}
   local index = 1
   while index <= #output do
     local eol = output:find("\0", index, true)
@@ -52,12 +63,15 @@ local function git_paths(root)
       local path = record:sub(4)
       if status:find("R", 1, true) or status:find("C", 1, true) then
         local previous = output:find("\0", index, true)
-        if previous then index = previous + 1 end
+        if previous then
+          renamed[output:sub(index, previous - 1)] = path
+          index = previous + 1
+        end
       end
       if path ~= "" then paths[#paths + 1] = path end
     end
   end
-  return paths
+  return paths, renamed
 end
 
 -- `result_type = "indices"` returned a flat list of integers before Neovim 0.11
@@ -88,53 +102,92 @@ function Changes.hunks_between(before, after)
   return group_hunks(result)
 end
 
-local function snapshot(root)
-  local paths = git_paths(root)
-  if not paths then return nil end
-  local budget = MAX_CHECKPOINT_BYTES
-  local files = {}
-  for _, path in ipairs(paths) do
-    local full = root .. "/" .. path
-    local content = read_content(full)
-    if content then
-      local entry = { key = vim.fn.sha256(content) }
-      if #content <= budget then
-        budget = budget - #content
-        entry.content = content
-      end
-      files[path] = entry
-    else
-      files[path] = { key = stat_key(full) }
-    end
-  end
-  return files
+-- Hunks from an earlier reading to the current one, or nil hunks plus the reason
+-- they are missing. `gap` is nil exactly when a reading kept its content, so a
+-- gap on either side is why the diff cannot be computed.
+local function diff_pair(previous, entry)
+  -- A first reading has nothing to compare against, which is expected rather
+  -- than a gap in the observation.
+  if not previous or not previous.key then return {}, entry.gap end
+  local missing = previous.gap or entry.gap
+  if missing then return {}, missing end
+  return Changes.hunks_between(previous.content, entry.content), nil
 end
 
-local function forget_content(files)
-  for _, entry in pairs(files) do entry.content = nil end
-  return files
+local function snapshot(root)
+  local paths, renamed = git_paths(root)
+  if not paths then return nil end
+  local candidates = {}
+  for _, path in ipairs(paths) do
+    local full = root .. "/" .. path
+    local content, reason = read_bytes(full)
+    candidates[#candidates + 1] = { path = path, full = full, content = content, gap = reason }
+  end
+  -- Spend the content budget on the cheapest files first. A large file's diff is
+  -- the expensive one to compute, so which files lose theirs should not come
+  -- down to alphabetical order.
+  table.sort(candidates, function(a, b)
+    local left = a.content and #a.content or math.huge
+    local right = b.content and #b.content or math.huge
+    if left == right then return a.path < b.path end
+    return left < right
+  end)
+  local budget = MAX_CHECKPOINT_BYTES
+  local files = {}
+  for _, candidate in ipairs(candidates) do
+    local entry = { gap = candidate.gap }
+    if candidate.content then
+      entry.revision = vim.fn.sha256(candidate.content)
+      entry.key = entry.revision
+      if #candidate.content <= budget then
+        budget = budget - #candidate.content
+        entry.content = candidate.content
+      else
+        entry.gap = "budget"
+      end
+    else
+      entry.key = stat_key(candidate.full)
+    end
+    files[candidate.path] = entry
+  end
+  return files, renamed
+end
+
+-- A reading of a path that is no longer in the changed set: its bytes when they
+-- can be read, a fingerprint when the file is too large to read, and nothing when
+-- no readable file is there.
+local function reading_of(full)
+  local content, reason = read_bytes(full)
+  if content then
+    local entry = { key = vim.fn.sha256(content), content = content }
+    entry.revision = entry.key
+    return entry
+  end
+  local key = stat_key(full)
+  if key then return { key = key, gap = reason } end
+  return { gap = reason }
 end
 
 function Changes.new(root, on_change)
-  local self = setmetatable({
-    root = root, on_change = on_change, checkpoints = {}, order = {}, files = {}, last = {},
+  return setmetatable({
+    root = root, on_change = on_change, checkpoints = {}, order = {}, files = {},
   }, Changes)
-  -- The baseline keeps revisions but not content: its content is only needed
-  -- when a tool start was never seen, and unbounded retention buys nothing.
-  self.last = forget_content(snapshot(root) or {})
-  return self
 end
 
 function Changes:before(id)
-  self.checkpoints[id] = snapshot(self.root) or vim.deepcopy(self.last)
+  -- `false` records that a window was opened but nothing could be seen in it, so
+  -- a host without a usable git stays quiet instead of reporting on every tool.
+  self.checkpoints[id] = snapshot(self.root) or false
   self.order[#self.order + 1] = id
   while #self.order > MAX_CHECKPOINTS do
+    -- Dropping the oldest window is reported when its tool ends: the comparison
+    -- is skipped rather than silently run against an older baseline.
     self.checkpoints[table.remove(self.order, 1)] = nil
   end
 end
 
 function Changes:after(id)
-  local before = self.checkpoints[id] or self.last
+  local before = self.checkpoints[id]
   self.checkpoints[id] = nil
   for index, pending in ipairs(self.order) do
     if pending == id then
@@ -142,39 +195,90 @@ function Changes:after(id)
       break
     end
   end
-  local after = snapshot(self.root)
+  if before == nil then
+    -- No window was opened for this id, so there is no baseline. Reporting
+    -- against an older one would credit this tool with changes it never made.
+    if self.on_change then self.on_change({}, id, "no baseline was recorded before it ran") end
+    return
+  end
+  if before == false then return end
+  local after, renamed = snapshot(self.root)
   if not after then return end
   local observed = {}
   for path, entry in pairs(after) do
     local previous = before[path]
-    if not previous or previous.key ~= entry.key then
+    local status
+    if entry.gap == "gone" then
+      status = "gone"
+    elseif entry.key == nil then
+      -- Present but not measurable: a directory, a submodule, a file that cannot
+      -- be opened. Reported when that state is new or has changed, because there
+      -- is nothing else about it to compare.
+      if previous == nil or previous.gap ~= entry.gap then status = "unreadable" end
+    elseif previous == nil or previous.key == nil then
+      status = "new"
+    elseif previous.key ~= entry.key then
+      status = "changed"
+    end
+    -- No status means nothing measurable changed during this window: the file was
+    -- in the changed set before and after with the same key, or it was
+    -- unmeasurable in the same way as before.
+    if status then
+      local hunks, hunks_reason = diff_pair(previous, entry)
       observed[#observed + 1] = {
         path = path,
-        status = previous and "changed" or "appeared",
-        revision = entry.key,
-        previous_revision = previous and previous.key or nil,
-        hunks = previous and Changes.hunks_between(previous.content, entry.content) or {},
+        status = status,
+        reason = entry.gap,
+        key = entry.key,
+        revision = entry.revision,
+        hunks = hunks,
+        hunks_reason = hunks_reason,
       }
     end
   end
   for path, previous in pairs(before) do
     if after[path] == nil then
-      -- Leaving the dirty set means a commit, a revert or a removal. Reading the
-      -- file separates them without guessing: unchanged bytes mean a commit,
-      -- changed bytes mean the explained revision is gone, and no file at all
-      -- means there is nothing left to compare against.
-      local content = read_content(self.root .. "/" .. path)
+      -- Leaving the changed set means a commit, a revert, a rename or a removal.
+      -- Reading the file separates them without guessing: the same key means a
+      -- commit, a different key means the explained reading is gone, and no file
+      -- at all means there is nothing left to compare against.
+      local full = self.root .. "/" .. path
+      local renamed_to = renamed and renamed[path]
+      local moved = renamed_to and after[renamed_to]
+      local entry, status
+      if moved then
+        -- Git reported the rename, so the bytes are the same file under a new
+        -- name and the earlier reading still describes them.
+        status = "renamed"
+        entry = moved
+      else
+        entry = reading_of(full)
+        if entry.gap == "gone" then
+          status = "gone"
+        elseif entry.key == nil then
+          status = "unreadable"
+        elseif previous.key == nil then
+          status = "new"
+        elseif previous.key == entry.key then
+          status = "unchanged"
+        else
+          status = "changed"
+        end
+      end
+      local hunks, hunks_reason = diff_pair(previous, entry)
       observed[#observed + 1] = {
         path = path,
-        status = "disappeared",
-        revision = content and vim.fn.sha256(content) or nil,
-        previous_revision = previous.key,
-        hunks = content and Changes.hunks_between(previous.content, content) or {},
+        status = status,
+        reason = entry.gap,
+        renamed_to = moved and renamed_to or nil,
+        key = entry.key,
+        revision = entry.revision,
+        hunks = hunks,
+        hunks_reason = hunks_reason,
       }
     end
   end
   table.sort(observed, function(a, b) return a.path < b.path end)
-  self.last = forget_content(after)
   for _, entry in ipairs(observed) do self.files[entry.path] = entry end
   if #observed > 0 and self.on_change then self.on_change(observed, id) end
 end

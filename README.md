@@ -9,8 +9,8 @@ A native Neovim interface for **pair programming with one existing coding agent*
 - A configurable pair-programming directive is sent only with the **first user prompt** in the session, without replacing Pi's system instructions or installing extensions.
 - Significant decisions can appear in a timeline, with rationale and linked files, when the model emits `PAIR_DECISION:` records.
 - Git-working-tree file changes are observed around tool execution and grouped by execution event (not falsely attributed as proven agent edits).
-- Each observation carries a real line-level diff and a content revision. Changed lines are highlighted in the file buffer, and `:PairChanges` lists one quickfix entry per hunk.
-- An explanation is bound to the revision of each file it names, so a later edit, revert or removal marks it as changed since rather than silently reusing the old rationale.
+- Each observation carries a line-level diff and a content revision **when it could read the bytes**: files over 2 MiB are tracked by size and mtime, so they get no content revision and no hunks. Changed lines are highlighted in the file buffer, and `:PairChanges` lists one quickfix entry per hunk, or the reason a diff is missing.
+- An explanation is bound to the reading of each file it names, so a later edit or revert marks it as changed since, and a file that is gone says so, instead of silently reusing the old rationale.
 - `:PairChanges` opens all observed changes in quickfix; `<CR>` on a file in the chat opens it in the editor.
 - User questions are **follow-ups** by default while the agent is working. Explicit steering enters at the next Pi turn boundary.
 - Follow mode is opt-in, so the agent does not seize the buffer you are reading.
@@ -53,7 +53,7 @@ Or add its root to `runtimepath` and run `:PairStart` (the `plugin/` entry point
 | `:PairContext` | Refresh the composer context from the current editor window |
 | `:PairSend` / `<C-s>` in composer | Send; if Pi is working, queue for after its run |
 | `:PairSteer` / `<C-t>` in composer | Steer; if working, deliver after current assistant turn's tool calls |
-| `:PairChanges` | Quickfix list of observed changes, one entry per hunk |
+| `:PairChanges` | Quickfix list of observed changes: one entry per hunk, or one entry saying why a diff is missing |
 | `:PairFollow` | Toggle automatic navigation to changed files |
 | `:PairInterrupt` | Explicitly abort the active Pi run |
 | `:PairStop` | Close Pi's stdin to request shutdown and close sidebar |
@@ -79,11 +79,12 @@ This is a **first vertical slice**, not a production-ready plugin:
 ```sh
 texlua tests/run.lua                      # portable logic suite, no Neovim required
 nvim --headless -l tests/integration.lua  # real plugin driven by a fake Pi RPC process
+bash tests/mutation-sweep.sh              # patches one behaviour at a time, expects checks to fail
 ```
 
-The logic suite runs under Lua 5.3 via `texlua`. The integration suite runs the plugin inside headless Neovim with `tests/fake-pi.lua` standing in for `pi --mode rpc`, so neither needs provider credentials or the `pi` CLI.
+The logic suite runs under Lua 5.3 via `texlua` (24 checks). The integration suite runs the plugin inside headless Neovim with `tests/fake-pi.lua` standing in for `pi --mode rpc` (46 checks), so neither needs provider credentials or the `pi` CLI. The mutation sweep is a development tool: it restores each file it patches, and it is how the suite is known to be load-bearing.
 
-What the integration suite covers: session start, the first-prompt-only directive, streamed assistant text, decision records with linked files, tool-boundary change observation, line-level hunks at the expected offsets, changed-line marks in the file buffer, per-hunk quickfix entries, revision binding of explanations, staleness after a later edit, the silent reload of an unmodified buffer, the refusal to overwrite a modified one, the refusal to abandon unsaved changes when opening a file, and shutdown.
+What the integration suite covers: session start, the first-prompt-only directive, streamed assistant text, decision records with linked files, tool-boundary change observation, line-level hunks at the expected offsets, changed-line marks in the file buffer, per-hunk quickfix entries, revision binding of explanations, staleness after a later edit, a real commit that does not mark an explanation, a real removal that does, the silent reload of an unmodified buffer, the refusal to overwrite a modified one, the refusal to abandon unsaved changes when opening a file, and shutdown.
 
 What it does not cover: extension dialogs, follow mode, and anything involving a live model. A real Neovim plus Pi acceptance pass with actual edits, steering and interruption is still required and has not been executed here.
 

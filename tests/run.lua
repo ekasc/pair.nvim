@@ -73,8 +73,21 @@ vim = {
 }
 
 local successes, failures = 0, 0
+-- Scratch directories created by tests. They are removed when each test ends,
+-- including when it fails part-way and never reaches its own cleanup line, so a
+-- failing run cannot leave a fixture behind on every attempt.
+local temporaries = {}
+local function workdir(suffix)
+  local base = os.tmpname():gsub("^@", "")
+  local path = base .. (suffix or "-pair")
+  temporaries[#temporaries + 1] = base
+  temporaries[#temporaries + 1] = path
+  return path
+end
 local function test(name, body)
   local ok, err = pcall(body)
+  for _, path in ipairs(temporaries) do os.execute("rm -rf " .. string.format("%q", path)) end
+  temporaries = {}
   if ok then
     successes = successes + 1
     print("PASS " .. name)
@@ -191,17 +204,21 @@ end)
 
 -- Stub Neovim presentation and actual git IO to test higher-level session behavior.
 local entries = {}
-local stale_calls = {}
+local mark_calls = {}
 package.loaded["pair.ui"] = {
   new = function()
     local ui = { entries = entries }
-    function ui:add(role, text, files, revisions)
-      local entry = { role = role, text = text or "", files = files or {}, revisions = revisions or {} }
+    function ui:add(role, text, files, bindings)
+      local entry = { role = role, text = text or "", files = files or {}, bindings = bindings or {} }
       entries[#entries + 1] = entry
       return entry
     end
-    function ui:mark_stale(path, revision)
-      stale_calls[#stale_calls + 1] = { path = path, revision = revision }
+    function ui:mark_revised(path, key)
+      mark_calls[#mark_calls + 1] = { name = "mark_revised", path = path, key = key }
+      return 0
+    end
+    function ui:mark_gone(path)
+      mark_calls[#mark_calls + 1] = { name = "mark_gone", path = path }
       return 0
     end
     function ui:request_render() end
@@ -263,28 +280,49 @@ test("session never sends hidden model thinking deltas to UI", function()
   assert(entries[#entries].text == "Visible explanation")
 end)
 
-test("a file leaving the dirty set reports the revision it left", function()
-  entries, stale_calls = {}, {}
+test("a reading that leaves the changed set is reported apart from a removal", function()
+  entries, mark_calls = {}, {}
   local session = Session.new("/repo", Config.options)
-  session.revisions["src/a.lua"] = "rev-old"
+  session.file_log["src/a.lua"] = { path = "src/a.lua", status = "changed", key = "rev-old", revision = "rev-old", hunks = {} }
 
-  -- Committed: the bytes on disk still match what an explanation described, so
-  -- the reported revision is the one already bound and nothing goes stale.
-  session:files_changed({ { path = "src/a.lua", status = "disappeared", revision = "rev-old", hunks = {} } }, "tool-1")
-  assert(stale_calls[1].path == "src/a.lua" and stale_calls[1].revision == "rev-old",
-    tostring(stale_calls[1] and stale_calls[1].revision))
+  -- Committed: the bytes still match the reading an explanation described, so
+  -- the same key is reported and nothing is marked.
+  session:files_changed({ { path = "src/a.lua", status = "unchanged", key = "rev-old", revision = "rev-old", hunks = {} } }, "tool-1")
+  assert(mark_calls[1].name == "mark_revised" and mark_calls[1].key == "rev-old", tostring(mark_calls[1] and mark_calls[1].key))
 
-  -- Reverted: the revision an explanation was written against is gone.
-  session:files_changed({ { path = "src/a.lua", status = "disappeared", revision = "rev-new", hunks = {} } }, "tool-2")
-  assert(stale_calls[2].revision == "rev-new", tostring(stale_calls[2].revision))
-  assert(session.revisions["src/a.lua"] == "rev-new", tostring(session.revisions["src/a.lua"]))
+  -- Reverted: the reading an explanation was written against is gone.
+  session:files_changed({ { path = "src/a.lua", status = "changed", key = "rev-new", revision = "rev-new", hunks = {}, hunks_reason = "budget" } }, "tool-2")
+  assert(mark_calls[2].key == "rev-new", tostring(mark_calls[2].key))
+  assert(session.file_log["src/a.lua"].revision == "rev-new", "the file log keeps the latest reading")
+  assert(session.revisions == nil, "the session keeps one registry, not two")
 
-  -- Removed: no revision survives for an explanation to describe.
-  session.revisions["src/b.lua"] = "rev-b"
-  session:files_changed({ { path = "src/b.lua", status = "disappeared", revision = nil, hunks = {} } }, "tool-3")
-  assert(stale_calls[3].path == "src/b.lua", tostring(stale_calls[3].path))
-  assert(stale_calls[3].revision == nil, "a removal reports no revision to compare against")
-  assert(session.revisions["src/b.lua"] == nil, "the dropped revision is not kept")
+  -- Removed: nothing is left to compare against, so the absence itself is what
+  -- gets reported.
+  session:files_changed({ { path = "src/b.lua", status = "gone", key = nil, revision = nil, hunks = {}, hunks_reason = "gone" } }, "tool-3")
+  assert(mark_calls[3].name == "mark_gone" and mark_calls[3].path == "src/b.lua", tostring(mark_calls[3] and mark_calls[3].name))
+end)
+
+test("a tool end with no window is reported instead of attributed", function()
+  entries = {}
+  local session = Session.new("/repo", Config.options)
+  session:files_changed({}, "tool-9", "no baseline was recorded before it ran")
+  assert(entries[#entries].role == "status", entries[#entries].role)
+  assert(entries[#entries].text:find("no baseline", 1, true), entries[#entries].text)
+end)
+
+test("an explanation binds the reading of each file it names", function()
+  entries = {}
+  local session = Session.new("/repo", Config.options)
+  session.file_log["src/a.lua"] = { path = "src/a.lua", status = "changed", key = "rev-1", revision = "rev-1" }
+  session.file_log["src/b.lua"] = { path = "src/b.lua", status = "gone", key = nil, revision = nil }
+  session:on_event("event", {
+    type = "message_end",
+    message = { role = "assistant", content = { { type = "text", text = "PAIR_DECISION: T | why | src/a.lua, src/b.lua, src/never.lua" } } },
+  })
+  local decision = entries[#entries]
+  assert(decision.bindings["src/a.lua"].key == "rev-1", tostring(decision.bindings["src/a.lua"].key))
+  assert(decision.bindings["src/b.lua"].gone == true, "a file that is already absent is bound as absent")
+  assert(decision.bindings["src/never.lua"] == nil, "an unobserved file has nothing to bind")
 end)
 
 
@@ -292,7 +330,7 @@ end)
 -- and real file contents, without requiring Neovim or a Git repository.
 test("multi-file scanner handles dirty edits, untracked spaces, renames", function()
   local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
-  local temp = os.tmpname():gsub("^@", "") .. "-pair"
+  local temp = workdir("-pair")
   os.execute("mkdir -p " .. string.format("%q", temp .. "/src") .. " " .. string.format("%q", temp .. "/tests"))
   local function write(relative, text)
     local f = assert(io.open(temp .. "/" .. relative, "wb"))
@@ -302,11 +340,12 @@ test("multi-file scanner handles dirty edits, untracked spaces, renames", functi
   write("src/a.lua", "old")
   write("src/with space.lua", "unchanged")
   write("gone.lua", "temporary")
+  write("src/previous.lua", "previous")
   write("tests/new.lua", "new")
-  local before = " M src/a.lua\0?? src/with space.lua\0?? gone.lua\0"
+  local before = " M src/a.lua\0?? src/with space.lua\0?? gone.lua\0?? src/previous.lua\0"
   local after = " M src/a.lua\0?? tests/new.lua\0R  renamed.lua\0src/previous.lua\0"
   write("renamed.lua", "renamed")
-  local outputs = { before, before, after }
+  local outputs = { before, after }
   local calls = 0
   vim.system = function()
     calls = calls + 1
@@ -323,44 +362,54 @@ test("multi-file scanner handles dirty edits, untracked spaces, renames", functi
   local tracker = ChangesReal.new(temp, function(entries) observed = entries end)
   tracker:before("call-1")
   write("src/a.lua", "updated")
-  -- Two ways to leave the dirty set, both after the before-snapshot: committed
-  -- with the bytes intact, and removed from the filesystem.
+  -- Three ways out of the dirty set, all after the before-snapshot: committed
+  -- with the bytes intact, removed from the filesystem, and renamed.
   assert(os.remove(temp .. "/gone.lua"))
+  assert(os.remove(temp .. "/src/previous.lua"))
   tracker:after("call-1")
 
   local by_path = {}
   for _, entry in ipairs(observed) do by_path[entry.path] = entry end
   local paths = {}
   for _, entry in ipairs(observed) do paths[#paths + 1] = entry.path end
-  assert(table.concat(paths, ",") == "gone.lua,renamed.lua,src/a.lua,src/with space.lua,tests/new.lua", table.concat(paths, ","))
+  assert(table.concat(paths, ",") == "gone.lua,renamed.lua,src/a.lua,src/previous.lua,src/with space.lua,tests/new.lua", table.concat(paths, ","))
 
   local changed = by_path["src/a.lua"]
   assert(changed.status == "changed", changed.status)
   assert(changed.revision == "hash-7:updated", changed.revision)
-  assert(changed.previous_revision == "hash-3:old", changed.previous_revision)
+  assert(changed.key == changed.revision, "a hashed file uses its hash as the change key")
   assert(#changed.hunks == 1, "a changed file carries hunks")
-  assert(by_path["renamed.lua"].status == "appeared", by_path["renamed.lua"].status)
-  assert(by_path["tests/new.lua"].status == "appeared", by_path["tests/new.lua"].status)
-  assert(#by_path["renamed.lua"].hunks == 0, "an appeared file has no before-side hunks")
+  assert(changed.renamed_to == nil, "an ordinary change is not a rename")
+  assert(by_path["tests/new.lua"].status == "new", by_path["tests/new.lua"].status)
+  assert(#by_path["tests/new.lua"].hunks == 0, "a first reading has no before-side hunks")
+  assert(by_path["tests/new.lua"].hunks_reason == nil, "a first reading is not a gap in the observation")
 
-  -- A commit and a removal both leave the dirty set. Only the bytes tell them
-  -- apart, and an explanation bound to a reverted revision must not stay current.
+  -- A rename is the same bytes under a new name, so the reading stays comparable
+  -- and an explanation that named the old path is not invalidated by it.
+  local renamed = by_path["src/previous.lua"]
+  assert(renamed.status == "renamed", renamed.status)
+  assert(renamed.renamed_to == "renamed.lua", tostring(renamed.renamed_to))
+  assert(renamed.key == by_path["renamed.lua"].key, "the rename keeps the reading comparable")
+  assert(renamed.revision == "hash-7:renamed", tostring(renamed.revision))
+  assert(#renamed.hunks == 1, "a rename with new bytes still carries hunks")
+
+  -- A commit and a removal both leave the dirty set. The bytes tell them apart,
+  -- and a removal has no reading left to publish as a revision.
   local committed = by_path["src/with space.lua"]
-  assert(committed.status == "disappeared", committed.status)
-  assert(committed.revision == committed.previous_revision,
-    tostring(committed.revision) .. " vs " .. tostring(committed.previous_revision))
+  assert(committed.status == "unchanged", committed.status)
+  assert(committed.revision == "hash-9:unchanged", tostring(committed.revision))
   local removed = by_path["gone.lua"]
-  assert(removed.status == "disappeared", removed.status)
+  assert(removed.status == "gone", removed.status)
   assert(removed.revision == nil, "a removed file has no revision left")
-  assert(removed.previous_revision == "hash-9:temporary", removed.previous_revision)
+  assert(removed.key == nil, "and no change key either")
+  assert(removed.hunks_reason == "gone", tostring(removed.hunks_reason))
   assert(next(tracker.checkpoints) == nil, "a completed checkpoint is released")
   assert(#tracker.order == 0, "the pending order is released with it")
-  os.execute("rm -rf " .. string.format("%q", temp))
 end)
 
 test("abandoned checkpoints stay bounded", function()
   local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
-  local temp = os.tmpname():gsub("^@", "") .. "-pair-bound"
+  local temp = workdir("-pair-bound")
   os.execute("mkdir -p " .. string.format("%q", temp))
   local seeded = assert(io.open(temp .. "/a.txt", "wb"))
   seeded:write("x")
@@ -383,7 +432,6 @@ test("abandoned checkpoints stay bounded", function()
   for _ in pairs(tracker.checkpoints) do held = held + 1 end
   assert(held == 8, "held checkpoints: " .. held)
   assert(#tracker.order == 8, "pending order length: " .. #tracker.order)
-  os.execute("rm -rf " .. string.format("%q", temp))
 end)
 
 test("hunk extraction accepts both vim.diff result shapes", function()
@@ -400,16 +448,50 @@ test("hunk extraction accepts both vim.diff result shapes", function()
   assert(#ChangesReal.hunks_between(nil, "text\n") == 0, "missing content has no hunks")
 end)
 
-test("explanations are marked stale when a revision moves", function()
+test("an explanation follows the reading it was bound to", function()
   local Ui = dofile(root .. "/lua/pair/ui.lua")
   local ui = Ui.new({ max_entries = 10 })
-  local entry = ui:add("decision", "title", { "src/a.lua" }, { ["src/a.lua"] = "rev-1" })
-  assert(ui:mark_stale("src/a.lua", "rev-1") == 0, "the same revision is not stale")
-  assert(ui:mark_stale("src/a.lua", "rev-2") == 1, "a moved revision marks the explanation stale")
-  assert(entry.stale["src/a.lua"] == true)
-  assert(entry.revisions["src/a.lua"] == "rev-1", "the bound revision is preserved")
-  assert(ui:mark_stale("src/other.lua", "rev-9") == 0, "unrelated files are unaffected")
-  assert(ui:mark_stale("src/a.lua", "rev-3") == 1, "marking repeats without error")
+  local entry = ui:add("decision", "title", { "src/a.lua" }, { ["src/a.lua"] = { key = "rev-1", revision = "rev-1" } })
+  assert(ui:mark_revised("src/a.lua", "rev-1") == 1, "the same reading is current")
+  assert(entry.bindings["src/a.lua"].revised == false, "the same reading is not marked")
+  assert(ui:mark_revised("src/a.lua", "rev-2") == 1, "a moved reading marks the explanation")
+  assert(entry.bindings["src/a.lua"].revised == true)
+  -- A file that comes back to the explained bytes is current again: the mark is
+  -- a comparison, not a latch.
+  assert(ui:mark_revised("src/a.lua", "rev-1") == 1)
+  assert(entry.bindings["src/a.lua"].revised == false, "the mark clears when the bytes return")
+  assert(entry.bindings["src/a.lua"].revision == "rev-1", "the bound revision is preserved")
+  assert(ui:mark_revised("src/other.lua", "rev-9") == 0, "unrelated files are unaffected")
+  assert(ui:mark_revised("src/a.lua", "rev-3") == 1, "marking repeats without error")
+  -- One reading cannot establish a change, so a file with no comparable key is
+  -- never claimed to have moved.
+  local weak = ui:add("decision", "title", { "src/b.lua" }, { ["src/b.lua"] = { key = nil, revision = nil } })
+  assert(ui:mark_revised("src/b.lua", "rev-3") == 1)
+  assert(weak.bindings["src/b.lua"].revised == false, "a single reading claims nothing")
+  -- An absent file is its own fact, and its return clears it.
+  assert(ui:mark_gone("src/a.lua") == 1)
+  assert(entry.bindings["src/a.lua"].gone == true and entry.bindings["src/a.lua"].revised == false)
+  assert(ui:mark_revised("src/a.lua", "rev-2") == 1)
+  assert(entry.bindings["src/a.lua"].gone == false, "a file that comes back is no longer absent")
+end)
+
+test("marks are refused for a buffer holding another reading", function()
+  vim.api = {
+    nvim_buf_is_valid = function() return true end,
+    nvim_buf_get_lines = function() return { "line one", "line two" } end,
+  }
+  local Marks = dofile(root .. "/lua/pair/marks.lua")
+  local revision = vim.fn.sha256("line one\nline two\n")
+  vim.bo = { [1] = { endofline = true, fileformat = "unix" } }
+  assert(Marks.matches(1, revision), "a buffer holding the reading matches")
+  assert(not Marks.matches(1, "hash-3:old"), "another reading does not match")
+  assert(not Marks.matches(1, nil), "an unknown reading cannot be matched")
+  -- A file with no trailing newline must not be padded to make it match.
+  vim.bo[1].endofline = false
+  assert(Marks.matches(1, vim.fn.sha256("line one\nline two")))
+  assert(not Marks.matches(1, revision), "assuming a trailing newline would be a false match")
+  vim.bo[1] = { endofline = true, fileformat = "dos" }
+  assert(Marks.matches(1, vim.fn.sha256("line one\r\nline two\r\n")), "CRLF buffers are compared as written")
 end)
 
 test("scanner degrades to no-op when git cannot be spawned", function()
@@ -424,6 +506,119 @@ test("scanner degrades to no-op when git cannot be spawned", function()
   end)
   assert(ok, "git-absent observation must not abort the session")
   assert(observed == nil)
+end)
+
+test("a file past the content ceiling gets a change key, not a revision", function()
+  local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
+  local size, clock = 3 * 1024 * 1024, 10
+  vim.uv = { fs_stat = function() return { type = "file", size = size, mtime = { sec = clock, nsec = 0 } } end }
+  -- Two windows over the same large file: rewritten, then committed.
+  local outputs = { " M big.txt\0", " M big.txt\0", " M big.txt\0", "" }
+  local calls = 0
+  vim.system = function()
+    calls = calls + 1
+    return { wait = function() return { code = 0, stdout = outputs[calls] } end }
+  end
+  local observed
+  local tracker = ChangesReal.new("/repo", function(entries) observed = entries end)
+
+  tracker:before("call-1")
+  clock = 11
+  tracker:after("call-1")
+  assert(#observed == 1, #observed)
+  assert(observed[1].status == "changed", observed[1].status)
+  assert(observed[1].revision == nil, "a fingerprint is not a content revision")
+  assert(observed[1].key == tostring(size) .. ":11:0", tostring(observed[1].key))
+  assert(observed[1].hunks_reason == "too_large", tostring(observed[1].hunks_reason))
+  assert(#observed[1].hunks == 0, "no diff without content on either side")
+
+  -- Committing does not touch the file, so the key does not move and nothing is
+  -- claimed about the reading. This is what a stale mark must not fire on.
+  tracker:before("call-2")
+  tracker:after("call-2")
+  assert(#observed == 1, #observed)
+  assert(observed[1].status == "unchanged", observed[1].status)
+  assert(observed[1].key == tostring(size) .. ":11:0", tostring(observed[1].key))
+  assert(observed[1].revision == nil, "a commit publishes no revision for an unread file")
+end)
+
+test("the content budget favours the files whose diffs are cheapest", function()
+  local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
+  local temp = workdir("-pair-budget")
+  os.execute("mkdir -p " .. string.format("%q", temp))
+  -- Four files fill the content budget exactly, so the fifth byte of anything is
+  -- spent. The small file sorts last by path and first by size, which is the only
+  -- way the two possible orders disagree about it.
+  local names = { "a1.txt", "a2.txt", "a3.txt", "a4.txt", "z.txt" }
+  local big, small = 2 * 1024 * 1024, "small\n"
+  for _, name in ipairs(names) do
+    local handle = assert(io.open(temp .. "/" .. name, "wb"))
+    handle:write(name == "z.txt" and small or string.rep("x", big))
+    handle:close()
+  end
+  local listed = {}
+  for _, name in ipairs(names) do listed[#listed + 1] = " M " .. name .. "\0" end
+  local porcelain = table.concat(listed)
+  vim.system = function() return { wait = function() return { code = 0, stdout = porcelain } end } end
+  local clock = 1
+  vim.uv = { fs_stat = function(path)
+    local probe = io.open(path, "rb")
+    if not probe then return nil end
+    local data = probe:read("*a")
+    probe:close()
+    return { type = "file", size = #data, mtime = { sec = clock, nsec = 0 } }
+  end }
+  local observed
+  local tracker = ChangesReal.new(temp, function(entries) observed = entries end)
+  tracker:before("call-1")
+  clock = 2
+  for _, name in ipairs(names) do
+    local handle = assert(io.open(temp .. "/" .. name, "wb"))
+    handle:write(name == "z.txt" and (small .. "more\n") or string.rep("y", big))
+    handle:close()
+  end
+  tracker:after("call-1")
+
+  local by_path, starved = {}, 0
+  for _, entry in ipairs(observed) do
+    by_path[entry.path] = entry
+    if entry.hunks_reason == "budget" then starved = starved + 1 end
+  end
+  -- Every file moved, so every file is reported. Content that cannot fit in the
+  -- budget is not quietly dropped: the reading is still published and the entry
+  -- says which part of it is missing.
+  assert(#observed == 5, #observed)
+  assert(#by_path["z.txt"].hunks == 1, "the smallest file keeps its diff")
+  assert(starved == 1, "files reporting a lost diff: " .. starved)
+  assert(by_path["a4.txt"].hunks_reason == "budget", tostring(by_path["a4.txt"].hunks_reason))
+  assert(by_path["a4.txt"].revision ~= nil, "the reading itself is still published")
+  assert(by_path["a1.txt"].hunks_reason == nil and #by_path["a1.txt"].hunks == 1, "the others keep theirs")
+end)
+
+test("a tool end with no recorded window is reported, not attributed", function()
+  local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
+  vim.system = function() return { wait = function() return { code = 0, stdout = " M f1.txt\0" } end } end
+  vim.uv = { fs_stat = function() return { type = "file", size = 1, mtime = { sec = 1, nsec = 1 } } end }
+  local observed, called_id, unavailable
+  local tracker = ChangesReal.new("/repo", function(entries, id, reason)
+    observed, called_id, unavailable = entries, id, reason
+  end)
+  -- More starts than the checkpoint bound, so the first window is dropped before
+  -- its tool ends. Reporting it against a later baseline would credit this tool
+  -- with another tool's edits, so it is reported as unobserved instead.
+  for index = 1, 20 do tracker:before("call-" .. index) end
+  tracker:after("call-1")
+  assert(observed ~= nil and #observed == 0, "nothing is attributed to the tool")
+  assert(called_id == "call-1", tostring(called_id))
+  assert(unavailable ~= nil and unavailable:find("no baseline", 1, true), tostring(unavailable))
+
+  -- A window that was opened but could not be seen, as on a host without a
+  -- usable git, stays quiet rather than reporting on every tool.
+  observed, unavailable = nil, nil
+  vim.system = function() error("vim/_core/system: ENOENT: no such file or directory (cmd): 'git'") end
+  tracker:before("call-21")
+  tracker:after("call-21")
+  assert(observed == nil and unavailable == nil, "an unavailable observation says nothing")
 end)
 
 print(("\n%d passed, %d failed"):format(successes, failures))

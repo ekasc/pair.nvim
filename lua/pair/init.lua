@@ -89,11 +89,41 @@ function M.interrupt()
   if not ok then notify(err, vim.log.levels.ERROR) end
 end
 
-local function hunk_text(entry, hunk)
-  if hunk.new_count == 0 then
-    return ("%s: %d line%s removed"):format(entry.status, hunk.old_count, hunk.old_count == 1 and "" or "s")
+-- Why a reading could not be compared or did not exist. The reason is the
+-- observation's own, so the list says what it knows instead of showing nothing.
+local REASONS = {
+  gone = "no file there",
+  too_large = "over the 2 MiB ceiling for content revisions",
+  not_a_file = "not a regular file",
+  unreadable = "the file could not be read",
+  budget = "content budget spent on other files",
+}
+
+local function status_text(entry)
+  if entry.status == "unreadable" then return "present but unreadable: " .. (REASONS[entry.reason] or entry.reason) end
+  if entry.status == "gone" then return "no longer on disk" end
+  if entry.status == "unchanged" then return "left the changed set; no change measured" end
+  if entry.status == "renamed" then return "renamed to " .. (entry.renamed_to or "another path") .. "; no change measured" end
+  if entry.status == "new" then return "first reading of this file" end
+  return "changed"
+end
+
+local function item_text(entry)
+  local text = status_text(entry)
+  -- A file that is gone or unreadable already says why in its status; repeating
+  -- that as a missing diff would say the same thing twice.
+  local explains_itself = entry.status == "gone" or entry.status == "unreadable" or entry.status == "new"
+  if entry.hunks_reason and not explains_itself then
+    text = text .. "; no diff available (" .. (REASONS[entry.hunks_reason] or entry.hunks_reason) .. ")"
   end
-  return ("%s: %d changed line%s"):format(entry.status, hunk.new_count, hunk.new_count == 1 and "" or "s")
+  return text
+end
+
+local function hunk_text(hunk)
+  if hunk.new_count == 0 then
+    return ("%d line%s removed"):format(hunk.old_count, hunk.old_count == 1 and "" or "s")
+  end
+  return ("%d changed line%s"):format(hunk.new_count, hunk.new_count == 1 and "" or "s")
 end
 
 function M.changes()
@@ -104,13 +134,13 @@ function M.changes()
   for _, entry in ipairs(entries) do
     local filename = M.session.root .. "/" .. entry.path
     if #entry.hunks == 0 then
-      items[#items + 1] = { filename = filename, lnum = 1, text = "Observed change (" .. entry.status .. ")" }
+      items[#items + 1] = { filename = filename, lnum = 1, text = item_text(entry) }
     else
       for _, hunk in ipairs(entry.hunks) do
         items[#items + 1] = {
           filename = filename,
           lnum = math.max(hunk.new_start or 1, 1),
-          text = hunk_text(entry, hunk),
+          text = hunk_text(hunk),
         }
       end
     end

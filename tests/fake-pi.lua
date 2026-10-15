@@ -9,9 +9,12 @@ local file = assert(os.getenv("FAKE_PI_FILE"), "FAKE_PI_FILE is not set")
 local log_path = assert(os.getenv("FAKE_PI_LOG"), "FAKE_PI_LOG is not set")
 
 -- Round-specific content so the expected hunk offsets are fixed, not emergent.
+-- A round mapped to false removes the file instead of writing it, which is how a
+-- deletion is observed end to end.
 local EDIT_CONTENT = {
   "alpha\nBETA CHANGED\ngamma\n",
   "alpha\nBETA CHANGED\ngamma\ndelta\n",
+  false,
 }
 
 local log = assert(io.open(log_path, "ab"))
@@ -68,9 +71,13 @@ local function handle(line)
   log:flush()
   if request_type(gate) == "get_state" then respond(gate, '{"sessionId":"fake-session"}') end
 
-  local handle = assert(io.open(file, "wb"))
-  handle:write(EDIT_CONTENT[round] or ("round " .. round .. "\n"))
-  handle:close()
+  if EDIT_CONTENT[round] == false then
+    os.remove(file)
+  else
+    local handle = assert(io.open(file, "wb"))
+    handle:write(EDIT_CONTENT[round] or ("round " .. round .. "\n"))
+    handle:close()
+  end
 
   send(('{"type":"tool_execution_end","toolCallId":"call-%d","toolName":"write-%d","isError":false}'):format(round, round))
 

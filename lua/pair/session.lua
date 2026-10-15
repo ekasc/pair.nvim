@@ -60,12 +60,12 @@ end
 function Session.new(root, config)
   local self = setmetatable({
     root = root, config = config, initialized = false, follow = config.follow_edits,
-    file_log = {}, revisions = {}, status = "idle", active_message = nil, backend = nil,
+    file_log = {}, status = "idle", active_message = nil, backend = nil,
   }, Session)
   self.ui = Ui.new(config.ui,
     function(text, steer, context) return self:submit(text, steer, context) end,
     function(file) self:open_file(file) end)
-  self.changes = Changes.new(root, function(files, id) self:files_changed(files, id) end)
+  self.changes = Changes.new(root, function(files, id, unavailable) self:files_changed(files, id, unavailable) end)
   self.backend = Pi.new(config.pi, function(kind, event) self:on_event(kind, event) end)
   return self
 end
@@ -139,11 +139,21 @@ function Session:on_event(kind, event)
     end
     self.active_message = nil
     for _, decision in ipairs(collect_decisions(text)) do
-      -- Bind the explanation to the revision of each file it names, so a later
-      -- edit can be recognised as having invalidated it.
-      local revisions = {}
-      for _, path in ipairs(decision.files) do revisions[path] = self.revisions[path] end
-      self.ui:add("decision", decision.title .. "\n" .. decision.rationale, decision.files, revisions)
+      -- Bind the explanation to the reading each file it names was last observed
+      -- at, so a later change can be recognised as having invalidated it. The key
+      -- is what the comparison uses; the revision is what a reader sees.
+      local bindings = {}
+      for _, path in ipairs(decision.files) do
+        local observed = self.file_log[path]
+        if observed then
+          bindings[path] = {
+            key = observed.key,
+            revision = observed.revision,
+            gone = observed.status == "gone",
+          }
+        end
+      end
+      self.ui:add("decision", decision.title .. "\n" .. decision.rationale, decision.files, bindings)
     end
     self.ui:request_render()
   elseif event.type == "tool_execution_start" then
@@ -195,24 +205,27 @@ function Session:extension_dialog(event)
   self.backend:reply(event.id, { cancelled = true })
 end
 
-function Session:files_changed(entries, tool_id)
+function Session:files_changed(entries, tool_id, unavailable)
+  if unavailable then
+    self.ui:add("status", "No change observation for tool " .. tostring(tool_id) .. ": " .. unavailable .. ".")
+    return
+  end
   local paths = {}
   for _, entry in ipairs(entries) do paths[#paths + 1] = entry.path end
   self.ui:add("files", "Changes observed during tool " .. tostring(tool_id) .. " (not proof of authorship):", paths)
   for _, entry in ipairs(entries) do
     local file = entry.path
     self.file_log[file] = entry
-    if entry.revision then
-      self.revisions[file] = entry.revision
-      -- An explanation recorded against an older revision no longer describes
-      -- what is on disk. When the revision is unchanged this call changes
-      -- nothing, so a commit does not invalidate anything.
-      self.ui:mark_stale(file, entry.revision)
-    elseif entry.status == "disappeared" then
-      -- The file is gone, so no revision exists that an explanation could still
-      -- be describing.
-      self.revisions[file] = nil
-      self.ui:mark_stale(file, nil)
+    if entry.key then
+      -- An explanation recorded against a different reading no longer describes
+      -- what is on disk. When the key is unchanged this call changes nothing, so
+      -- a commit does not invalidate anything, and a file that comes back to the
+      -- explained bytes stops being marked.
+      self.ui:mark_revised(file, entry.key)
+    elseif entry.status == "gone" then
+      -- No key exists to compare with, but the file an explanation names is no
+      -- longer there, which is its own fact.
+      self.ui:mark_gone(file)
     end
     self:refresh_buffer(file, entry)
   end
@@ -233,9 +246,14 @@ function Session:refresh_buffer(file, entry)
   vim.bo[bufnr].autoread = true
   vim.api.nvim_buf_call(bufnr, function() vim.cmd("silent! checktime") end)
   vim.bo[bufnr].autoread = autoread
-  -- Marks describe line numbers in the revision just observed, so they are only
-  -- placed once the buffer actually holds that revision.
-  if not vim.bo[bufnr].modified then Marks.apply(bufnr, entry.hunks) end
+  -- Marks describe line numbers in the revision just observed. The buffer is
+  -- checked against that revision instead of being trusted to have reloaded:
+  -- line numbers from another revision would point at the wrong code.
+  if Marks.matches(bufnr, entry.revision) then
+    Marks.apply(bufnr, entry.hunks)
+  else
+    Marks.clear(bufnr)
+  end
 end
 
 function Session:open_file(file)
@@ -273,7 +291,11 @@ function Session:open_file(file)
   local entry = self.file_log[file]
   if entry then
     local bufnr = vim.api.nvim_get_current_buf()
-    if not vim.bo[bufnr].modified then Marks.apply(bufnr, entry.hunks) end
+    if Marks.matches(bufnr, entry.revision) then
+      Marks.apply(bufnr, entry.hunks)
+    else
+      Marks.clear(bufnr)
+    end
   end
 end
 

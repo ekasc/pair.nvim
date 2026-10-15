@@ -20,6 +20,20 @@ function M.clear(bufnr)
   end
 end
 
+-- Whether a buffer holds the same bytes as an observed revision. Marks are line
+-- numbers in one revision, so placing them in a buffer holding another revision
+-- would point at the wrong code. Bytes that do not round-trip through a buffer
+-- (NUL bytes, an empty file read as one empty line) mismatch, which costs marks
+-- on files where they would be meaningless anyway.
+function M.matches(bufnr, revision)
+  if type(revision) ~= "string" then return false end
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return false end
+  local text = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+  if vim.bo[bufnr].endofline then text = text .. "\n" end
+  if vim.bo[bufnr].fileformat == "dos" then text = text:gsub("\n", "\r\n") end
+  return vim.fn.sha256(text) == revision
+end
+
 -- Marks the new-side line ranges of each hunk. A pure deletion has no new
 -- lines, so it produces no mark; the quickfix list is where those show up.
 function M.apply(bufnr, hunks)
