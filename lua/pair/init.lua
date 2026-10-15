@@ -1,5 +1,6 @@
 local Config = require("pair.config")
 local Session = require("pair.session")
+local Changes = require("pair.changes")
 
 local M = { session = nil, commands_registered = false }
 
@@ -93,7 +94,7 @@ end
 -- observation's own, so the list says what it knows instead of showing nothing.
 local REASONS = {
   gone = "no file there",
-  too_large = "over the 2 MiB ceiling for content revisions",
+  too_large = ("over the %d MiB ceiling for content revisions"):format(Changes.MAX_FILE_BYTES / (1024 * 1024)),
   not_a_file = "not a regular file",
   unreadable = "the file could not be read",
   budget = "content budget spent on other files",
@@ -103,7 +104,7 @@ local function status_text(entry)
   if entry.status == "unreadable" then return "present but unreadable: " .. (REASONS[entry.reason] or entry.reason) end
   if entry.status == "gone" then return "no longer on disk" end
   if entry.status == "unchanged" then return "left the changed set; no change measured" end
-  if entry.status == "renamed" then return "renamed to " .. (entry.renamed_to or "another path") .. "; no change measured" end
+  if entry.status == "renamed" then return "renamed to " .. (entry.renamed_to or "another path") end
   if entry.status == "new" then return "first reading of this file" end
   return "changed"
 end

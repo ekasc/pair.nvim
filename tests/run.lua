@@ -315,16 +315,39 @@ test("an explanation binds the reading of each file it names", function()
   local session = Session.new("/repo", Config.options)
   session.file_log["src/a.lua"] = { path = "src/a.lua", status = "changed", key = "rev-1", revision = "rev-1" }
   session.file_log["src/b.lua"] = { path = "src/b.lua", status = "gone", key = nil, revision = nil }
+  -- A file past the content ceiling is tracked by a fingerprint instead of a
+  -- revision. The binding has to carry that fingerprint, because it is what the
+  -- comparison uses; the revision it publishes is what a reader sees, and here
+  -- there is none.
+  session.file_log["src/big.lua"] = { path = "src/big.lua", status = "changed", key = "3145728:11:0", revision = nil }
   session:on_event("event", {
     type = "message_end",
-    message = { role = "assistant", content = { { type = "text", text = "PAIR_DECISION: T | why | src/a.lua, src/b.lua, src/never.lua" } } },
+    message = { role = "assistant", content = { { type = "text", text = "PAIR_DECISION: T | why | src/a.lua, src/b.lua, src/big.lua, src/never.lua" } } },
   })
   local decision = entries[#entries]
   assert(decision.bindings["src/a.lua"].key == "rev-1", tostring(decision.bindings["src/a.lua"].key))
   assert(decision.bindings["src/b.lua"].gone == true, "a file that is already absent is bound as absent")
+  assert(decision.bindings["src/big.lua"].key == "3145728:11:0",
+    "a large file is bound by its fingerprint, not by a revision it does not have: " .. tostring(decision.bindings["src/big.lua"].key))
+  assert(decision.bindings["src/big.lua"].revision == nil, "and publishes no revision")
   assert(decision.bindings["src/never.lua"] == nil, "an unobserved file has nothing to bind")
 end)
 
+test("a tool event without an id is reported instead of raised", function()
+  entries = {}
+  local session = Session.new("/repo", Config.options)
+  local ok, err = pcall(function()
+    session:on_event("event", { type = "tool_execution_start", toolName = "write" })
+    session:on_event("event", { type = "tool_execution_end", toolName = "write" })
+  end)
+  assert(ok, "a malformed tool event must not throw out of the event callback: " .. tostring(err))
+  local reported = nil
+  for _, entry in ipairs(entries) do
+    if entry.role == "error" then reported = entry end
+  end
+  assert(reported ~= nil, "an unpaired tool event must be reported")
+  assert(reported.text:find("without an id", 1, true), reported.text)
+end)
 
 -- Exercise the actual NUL-delimited Git scanner using synthetic status output
 -- and real file contents, without requiring Neovim or a Git repository.
@@ -341,10 +364,14 @@ test("multi-file scanner handles dirty edits, untracked spaces, renames", functi
   write("src/with space.lua", "unchanged")
   write("gone.lua", "temporary")
   write("src/previous.lua", "previous")
+  write("src/keep.lua", "kept")
   write("tests/new.lua", "new")
-  local before = " M src/a.lua\0?? src/with space.lua\0?? gone.lua\0?? src/previous.lua\0"
-  local after = " M src/a.lua\0?? tests/new.lua\0R  renamed.lua\0src/previous.lua\0"
+  local before = " M src/a.lua\0?? src/with space.lua\0?? gone.lua\0?? src/previous.lua\0?? src/keep.lua\0"
+  -- A copy is reported like a rename. The original stays where it is, so the copy
+  -- is a new file and must not be read as the original's reading moving.
+  local after = " M src/a.lua\0?? tests/new.lua\0R  renamed.lua\0src/previous.lua\0?? src/keep.lua\0C  copied.lua\0src/keep.lua\0"
   write("renamed.lua", "renamed")
+  write("copied.lua", "kept")
   local outputs = { before, after }
   local calls = 0
   vim.system = function()
@@ -372,7 +399,7 @@ test("multi-file scanner handles dirty edits, untracked spaces, renames", functi
   for _, entry in ipairs(observed) do by_path[entry.path] = entry end
   local paths = {}
   for _, entry in ipairs(observed) do paths[#paths + 1] = entry.path end
-  assert(table.concat(paths, ",") == "gone.lua,renamed.lua,src/a.lua,src/previous.lua,src/with space.lua,tests/new.lua", table.concat(paths, ","))
+  assert(table.concat(paths, ",") == "copied.lua,gone.lua,renamed.lua,src/a.lua,src/previous.lua,src/with space.lua,tests/new.lua", table.concat(paths, ","))
 
   local changed = by_path["src/a.lua"]
   assert(changed.status == "changed", changed.status)
@@ -383,15 +410,24 @@ test("multi-file scanner handles dirty edits, untracked spaces, renames", functi
   assert(by_path["tests/new.lua"].status == "new", by_path["tests/new.lua"].status)
   assert(#by_path["tests/new.lua"].hunks == 0, "a first reading has no before-side hunks")
   assert(by_path["tests/new.lua"].hunks_reason == nil, "a first reading is not a gap in the observation")
+  assert(by_path["copied.lua"].status == "new", "a copy of a file that is still there is a new file: " .. tostring(by_path["copied.lua"].status))
+  assert(by_path["copied.lua"].renamed_to == nil, "a copy does not claim the original moved")
+  assert(by_path["src/keep.lua"] == nil, "a file that was equally dirty before and after produces no entry")
 
-  -- A rename is the same bytes under a new name, so the reading stays comparable
-  -- and an explanation that named the old path is not invalidated by it.
+  -- A rename is the same content under a new name. The reading stays comparable,
+  -- so an explanation naming the old path is not invalidated by the move, and the
+  -- new file's content hash and line numbers are reported under the new path,
+  -- which is the path they describe.
   local renamed = by_path["src/previous.lua"]
   assert(renamed.status == "renamed", renamed.status)
   assert(renamed.renamed_to == "renamed.lua", tostring(renamed.renamed_to))
   assert(renamed.key == by_path["renamed.lua"].key, "the rename keeps the reading comparable")
-  assert(renamed.revision == "hash-7:renamed", tostring(renamed.revision))
-  assert(#renamed.hunks == 1, "a rename with new bytes still carries hunks")
+  assert(renamed.revision == nil, "the new file's content hash is not published under the old path")
+  assert(#renamed.hunks == 0, "the new file's line numbers are not filed under the old path")
+  local moved_to = by_path["renamed.lua"]
+  assert(moved_to.status == "changed", moved_to.status)
+  assert(moved_to.revision == "hash-7:renamed", tostring(moved_to.revision))
+  assert(#moved_to.hunks == 1, "an edit alongside a rename is reported where the bytes are")
 
   -- A commit and a removal both leave the dirty set. The bytes tell them apart,
   -- and a removal has no reading left to publish as a revision.
@@ -405,6 +441,46 @@ test("multi-file scanner handles dirty edits, untracked spaces, renames", functi
   assert(removed.hunks_reason == "gone", tostring(removed.hunks_reason))
   assert(next(tracker.checkpoints) == nil, "a completed checkpoint is released")
   assert(#tracker.order == 0, "the pending order is released with it")
+end)
+
+test("a repeated absence is reported once, and a return is reported", function()
+  local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
+  local temp = workdir("-pair-absent")
+  os.execute("mkdir -p " .. string.format("%q", temp))
+  local on_disk = assert(io.open(temp .. "/gone.lua", "wb"))
+  on_disk:write("")
+  on_disk:close()
+  -- Porcelain keeps listing a staged deletion until it is committed, so the same
+  -- absence is visible in every window that follows it.
+  vim.system = function()
+    return { wait = function() return { code = 0, stdout = " D gone.lua\0" } end }
+  end
+  local state = "absent"
+  vim.uv = { fs_stat = function()
+    if state == "absent" then return nil end
+    local probe = assert(io.open(temp .. "/gone.lua", "rb"))
+    local data = probe:read("*a")
+    probe:close()
+    return { type = "file", size = #data, mtime = { sec = 1, nsec = 1 } }
+  end }
+  local reports = {}
+  local tracker = ChangesReal.new(temp, function(entries, id) reports[#reports + 1] = { id = id, entries = entries } end)
+  local function window(id, change)
+    tracker:before(id)
+    if change then change() end
+    tracker:after(id)
+    return reports[#reports]
+  end
+  local first = window("w1")
+  assert(first and first.entries[1].status == "gone", "an absence is reported when it is new")
+  assert(window("w2") == first, "and is not reported again in the next window")
+  -- Coming back is reported when a window sees it come back. A restore that
+  -- happens between two windows is invisible to both of them: the tracker
+  -- compares the start of a window with its end, and neither saw the transition.
+  local returned = window("w3", function() state = "present" end)
+  assert(returned ~= first and returned.entries[1].status == "new", "a file that comes back is a new reading")
+  local gone_again = window("w4", function() state = "absent" end)
+  assert(gone_again ~= returned and gone_again.entries[1].status == "gone", "and its second absence is reported too")
 end)
 
 test("abandoned checkpoints stay bounded", function()
@@ -492,6 +568,11 @@ test("marks are refused for a buffer holding another reading", function()
   assert(not Marks.matches(1, revision), "assuming a trailing newline would be a false match")
   vim.bo[1] = { endofline = true, fileformat = "dos" }
   assert(Marks.matches(1, vim.fn.sha256("line one\r\nline two\r\n")), "CRLF buffers are compared as written")
+  -- A byte-order mark is stripped out of the first line into an option, so the
+  -- comparison has to put it back.
+  vim.bo[1] = { endofline = true, fileformat = "unix", bomb = true }
+  assert(Marks.matches(1, vim.fn.sha256("\239\187\191line one\nline two\n")), "a byte-order mark is put back before comparing")
+  assert(not Marks.matches(1, revision), "a buffer with a mark does not match the bytes without one")
 end)
 
 test("scanner degrades to no-op when git cannot be spawned", function()

@@ -1,33 +1,72 @@
 #!/bin/bash
 # Mutation checks: each patch disables one fixed behaviour and must make the
 # checks that cover it fail. Files are restored from backup after each run.
+#
+# The sweep reports and exits non-zero on any patch that does not apply, does
+# not change the file, or leaves the checks passing: a mutation tool that can
+# only print is not evidence that the checks bite.
 set -u
-cd /Users/ekassinghchhabra/Projects/lua/pair.nvim
+
+# The repository is found from this script, not from the caller's directory.
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root" || exit 2
 work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+LOGIC="texlua tests/run.lua"
+INTEG="nvim --headless -l tests/integration.lua"
+
+for runner in "${LOGIC%% *}" "${INTEG%% *}"; do
+  if ! command -v "$runner" >/dev/null 2>&1; then
+    echo "missing test runner: $runner" >&2
+    exit 2
+  fi
+done
+
+bad=0
+# The sweep copies files aside and puts them back. Comparing the repository state
+# before and after proves the putting back worked, without failing when the
+# caller had their own uncommitted work when they started.
+state_before=""
+if command -v git >/dev/null 2>&1; then state_before=$(git status --porcelain); fi
 
 run_one() { # label, target file, perl expression, test command
   local label=$1 file=$2 expr=$3 cmd=$4
   cp "$file" "$work/backup"
+  cp "$file" "$work/original"
   if ! perl -0pi -e "$expr" "$file" 2>"$work/err"; then
     printf '%-46s PATCH ERROR: %s\n' "$label" "$(cat "$work/err")"
     cp "$work/backup" "$file"
+    bad=$((bad + 1))
     return
   fi
   if cmp -s "$work/backup" "$file"; then
     printf '%-46s PATCH DID NOT APPLY\n' "$label"
     cp "$work/backup" "$file"
+    bad=$((bad + 1))
     return
   fi
-  local out fails
+  local out fails ran
   out=$(eval "$cmd" 2>&1)
   fails=$(printf '%s\n' "$out" | grep -c '^FAIL')
-  printf '%-46s %s checks failed\n' "$label" "$fails"
-  printf '%s\n' "$out" | grep '^FAIL' | sed 's/^/      /'
+  # A patch that changes nothing observable may still make a runner die before it
+  # reports, which is not the same as the checks catching the mutation.
+  ran=$(printf '%s\n' "$out" | grep -c '^PASS')
+  if [ "$fails" -eq 0 ] || [ "$ran" -eq 0 ]; then
+    printf '%-46s NO BITE (%s checks failed, %s checks ran)\n' "$label" "$fails" "$ran"
+    printf '%s\n' "$out" | grep -E '^(FAIL|.*error.*|E[0-9]+)' | head -5 | sed 's/^/      /'
+    bad=$((bad + 1))
+  else
+    printf '%-46s %s checks failed\n' "$label" "$fails"
+    printf '%s\n' "$out" | grep '^FAIL' | sed 's/^/      /'
+  fi
   cp "$work/backup" "$file"
+  if ! cmp -s "$work/backup" "$file"; then
+    printf '%-46s RESTORE FAILED\n' "$label"
+    cp "$work/original" "$file"
+    bad=$((bad + 1))
+  fi
 }
-
-LOGIC="texlua tests/run.lua"
-INTEG="nvim --headless -l tests/integration.lua"
 
 run_one "marks gate on buffer content" lua/pair/marks.lua \
   's/return vim\.fn\.sha256\(text\) == revision/return true/' "$LOGIC"
@@ -37,20 +76,39 @@ run_one "no sentinels in the change key" lua/pair/changes.lua \
   's/if not stat or stat\.type ~= "file" or stat\.size <= MAX_FILE_BYTES then return nil end/if not stat then return "<deleted>" end\n  if stat.type ~= "file" or stat.size <= MAX_FILE_BYTES then return nil end/' "$LOGIC"
 run_one "rename keeps the reading comparable" lua/pair/changes.lua \
   's/local moved = renamed_to and after\[renamed_to\]/local moved = nil/' "$LOGIC"
+run_one "rename publishes nothing for the old path" lua/pair/changes.lua \
+  's/^        revision = nil$/        revision = entry.revision/m' "$LOGIC"
+run_one "a copy is not a moved reading" lua/pair/changes.lua \
+  's/    if after\[origin\] == nil then origin_of\[target\] = origin end/    origin_of[target] = origin/' "$LOGIC"
 run_one "budget favours cheap files" lua/pair/changes.lua \
   's/    if left == right then return a\.path < b\.path end\n    return left < right/    return a.path < b.path/' "$LOGIC"
 run_one "a dropped window is reported" lua/pair/changes.lua \
   's/self\.on_change\(\{\}, id, "no baseline was recorded before it ran"\)/self.on_change({}, id)/' "$LOGIC"
+run_one "a repeated absence is reported once" lua/pair/changes.lua \
+  's/      if reported == nil or reported\.status ~= state or reported\.reason ~= read_reason\(entry\) then/      if true then/' "$LOGIC"
 run_one "a commit is not a change" lua/pair/changes.lua \
   's/        elseif previous\.key == entry\.key then/        elseif false then/' "$LOGIC"
 run_one "a commit is not a change (integration)" lua/pair/changes.lua \
   's/        elseif previous\.key == entry\.key then/        elseif false then/' "$INTEG"
+run_one "a commit keeps the reading comparable" lua/pair/changes.lua \
+  's/    local entry = \{ key = vim\.fn\.sha256\(content\), content = content \}/    local entry = { key = tostring(#content) .. ":" .. content:sub(1, 1), content = content }/' "$INTEG"
 run_one "an absent file is marked absent" lua/pair/session.lua \
   's/    elseif entry\.status == "gone" then/    elseif false then/' "$LOGIC"
 run_one "an absent file is marked absent (integration)" lua/pair/session.lua \
   's/    elseif entry\.status == "gone" then/    elseif false then/' "$INTEG"
+run_one "marks leave a buffer holding another revision" lua/pair/session.lua \
+  's/    Marks\.clear\(bufnr\)\n    return/    -- cleared\n    return/' "$INTEG"
 run_one "the revised mark clears" lua/pair/ui.lua \
   's/      binding\.revised = \(binding\.key ~= nil and key ~= nil and binding\.key ~= key\) or false/      binding.revised = binding.revised or (binding.key ~= nil and key ~= nil and binding.key ~= key) or false/' "$LOGIC"
 
 rm -rf "$work"
-echo "--- mutation sweep done"
+if command -v git >/dev/null 2>&1 && [ "$(git status --porcelain)" != "$state_before" ]; then
+  echo "--- mutation sweep FAILED: the repository was not restored" >&2
+  git status --porcelain >&2
+  exit 1
+fi
+if [ "$bad" -ne 0 ]; then
+  echo "--- mutation sweep FAILED: $bad patch(es) did not bite"
+  exit 1
+fi
+echo "--- mutation sweep done: every patch bit"

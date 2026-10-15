@@ -5,6 +5,8 @@ Changes.__index = Changes
 -- gets no content revision and no line-level diff: reading it to hash it would
 -- cost as much memory as the file itself.
 local MAX_FILE_BYTES = 2 * 1024 * 1024
+-- Published so that wording about the ceiling is derived from the ceiling.
+Changes.MAX_FILE_BYTES = MAX_FILE_BYTES
 -- Total content a single checkpoint keeps so it can be diffed later. Files past
 -- the budget are still reported, with the reason their diff is missing.
 local MAX_CHECKPOINT_BYTES = 8 * 1024 * 1024
@@ -114,6 +116,14 @@ local function diff_pair(previous, entry)
   return Changes.hunks_between(previous.content, entry.content), nil
 end
 
+-- Why a reading has no content, or nil when the bytes were read. "budget" means
+-- they were read and then dropped to stay inside the checkpoint budget, so it is
+-- a reason a diff is missing rather than a reason nothing could be read.
+local function read_reason(entry)
+  if entry.gap == "budget" then return nil end
+  return entry.gap
+end
+
 local function snapshot(root)
   local paths, renamed = git_paths(root)
   if not paths then return nil end
@@ -175,6 +185,10 @@ function Changes.new(root, on_change)
 end
 
 function Changes:before(id)
+  -- A tool event with no id cannot be paired with its end and cannot index a
+  -- checkpoint either, so there is no window to open. Pi omits the id only on
+  -- malformed input, and a raise here would land in the event callback.
+  if id == nil then return end
   -- `false` records that a window was opened but nothing could be seen in it, so
   -- a host without a usable git stays quiet instead of reporting on every tool.
   self.checkpoints[id] = snapshot(self.root) or false
@@ -187,6 +201,7 @@ function Changes:before(id)
 end
 
 function Changes:after(id)
+  if id == nil then return end
   local before = self.checkpoints[id]
   self.checkpoints[id] = nil
   for index, pending in ipairs(self.order) do
@@ -204,17 +219,31 @@ function Changes:after(id)
   if before == false then return end
   local after, renamed = snapshot(self.root)
   if not after then return end
+  -- A rename moves a reading rather than ending it. The new path is compared
+  -- against the reading its old path had, so the diff is computed from the right
+  -- baseline and reported where the file actually is: hunks carry line numbers
+  -- in the new file, which the old path no longer is. Git reports a copy the same
+  -- way, and a copy leaves the original in place, so a file that happens to hold
+  -- the same bytes as one that is still there is a new file, not a moved reading.
+  local origin_of = {}
+  for origin, target in pairs(renamed or {}) do
+    if after[origin] == nil then origin_of[target] = origin end
+  end
   local observed = {}
   for path, entry in pairs(after) do
-    local previous = before[path]
+    local origin = origin_of[path]
+    local previous = before[path] or (origin and before[origin])
     local status
-    if entry.gap == "gone" then
-      status = "gone"
-    elseif entry.key == nil then
-      -- Present but not measurable: a directory, a submodule, a file that cannot
-      -- be opened. Reported when that state is new or has changed, because there
-      -- is nothing else about it to compare.
-      if previous == nil or previous.gap ~= entry.gap then status = "unreadable" end
+    if entry.key == nil then
+      -- Gone, a directory, a submodule, a file that cannot be opened: there is
+      -- nothing to compare, so the state is news when the reader has not been
+      -- told it. Porcelain keeps listing a staged deletion in every window that
+      -- follows it, and a directory stays a directory.
+      local reported = self.files[path]
+      local state = entry.gap == "gone" and "gone" or "unreadable"
+      if reported == nil or reported.status ~= state or reported.reason ~= read_reason(entry) then
+        status = state
+      end
     elseif previous == nil or previous.key == nil then
       status = "new"
     elseif previous.key ~= entry.key then
@@ -228,7 +257,7 @@ function Changes:after(id)
       observed[#observed + 1] = {
         path = path,
         status = status,
-        reason = entry.gap,
+        reason = read_reason(entry),
         key = entry.key,
         revision = entry.revision,
         hunks = hunks,
@@ -247,8 +276,11 @@ function Changes:after(id)
       local moved = renamed_to and after[renamed_to]
       local entry, status
       if moved then
-        -- Git reported the rename, so the bytes are the same file under a new
-        -- name and the earlier reading still describes them.
+        -- Git reported the rename, so the earlier reading still describes these
+        -- bytes under the new name and the key keeps the comparison possible.
+        -- The revision and the hunks describe the new path, and that is where
+        -- they are reported; claiming them here would attach the new file's
+        -- content hash and line numbers to a path holding neither.
         status = "renamed"
         entry = moved
       else
@@ -265,14 +297,21 @@ function Changes:after(id)
           status = "changed"
         end
       end
-      local hunks, hunks_reason = diff_pair(previous, entry)
+      -- Hunks and the content hash describe the new path when a rename moved
+      -- them, so neither is published under this one.
+      local hunks, hunks_reason, revision = {}, nil, entry.revision
+      if moved then
+        revision = nil
+      else
+        hunks, hunks_reason = diff_pair(previous, entry)
+      end
       observed[#observed + 1] = {
         path = path,
         status = status,
-        reason = entry.gap,
+        reason = read_reason(entry),
         renamed_to = moved and renamed_to or nil,
         key = entry.key,
-        revision = entry.revision,
+        revision = revision,
         hunks = hunks,
         hunks_reason = hunks_reason,
       }

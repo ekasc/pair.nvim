@@ -157,10 +157,16 @@ function Session:on_event(kind, event)
     end
     self.ui:request_render()
   elseif event.type == "tool_execution_start" then
-    self.changes:before(event.toolCallId)
+    if event.toolCallId == nil then
+      -- A tool with no id cannot be paired with its end, so its window cannot be
+      -- observed. Reported rather than thrown: this runs inside an event callback.
+      self.ui:add("error", "A tool started without an id; its changes cannot be observed.")
+    else
+      self.changes:before(event.toolCallId)
+    end
     if event.toolName then self.ui:add("tool", "Running " .. event.toolName) end
   elseif event.type == "tool_execution_end" then
-    self.changes:after(event.toolCallId)
+    if event.toolCallId ~= nil then self.changes:after(event.toolCallId) end
     if event.isError then self.ui:add("error", "Tool failed: " .. tostring(event.toolName)) end
   elseif event.type == "extension_ui_request" then
     self:extension_dialog(event)
@@ -238,6 +244,10 @@ function Session:refresh_buffer(file, entry)
   if bufnr == -1 or not vim.api.nvim_buf_is_loaded(bufnr) then return end
   if vim.bo[bufnr].modified then
     self.ui:add("status", "Unsaved buffer conflicts with disk change: " .. file)
+    -- The buffer holds neither the revision it was marked at nor the one just
+    -- observed, and the user's own edits have already moved any mark on it. Line
+    -- numbers belonging to neither revision are cleared rather than left behind.
+    Marks.clear(bufnr)
     return
   end
   -- Force one silent reload, then put the user's option back. Observation

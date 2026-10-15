@@ -22,15 +22,18 @@ end
 
 -- Whether a buffer holds the same bytes as an observed revision. Marks are line
 -- numbers in one revision, so placing them in a buffer holding another revision
--- would point at the wrong code. Bytes that do not round-trip through a buffer
--- (NUL bytes, an empty file read as one empty line) mismatch, which costs marks
--- on files where they would be meaningless anyway.
+-- would point at the wrong code. A byte-order mark is held in an option rather
+-- than in the first line, so it is put back before comparing. Two shapes cannot
+-- be reconstructed from a buffer and mismatch, which costs marks rather than
+-- putting them on the wrong lines: an empty file, which reads as one empty line,
+-- and mac-classic line endings, which a buffer joins with newlines.
 function M.matches(bufnr, revision)
   if type(revision) ~= "string" then return false end
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return false end
   local text = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
   if vim.bo[bufnr].endofline then text = text .. "\n" end
   if vim.bo[bufnr].fileformat == "dos" then text = text:gsub("\n", "\r\n") end
+  if vim.bo[bufnr].bomb then text = "\239\187\191" .. text end
   return vim.fn.sha256(text) == revision
 end
 

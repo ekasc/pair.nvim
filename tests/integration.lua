@@ -145,34 +145,48 @@ if has_git then
   vim.cmd("cclose")
   check("quickfix points at the changed line", quickfix[1] and quickfix[1].lnum == 2, vim.inspect(quickfix[1]))
 
+  -- A byte-order mark lives in an option rather than in the first line, so a
+  -- buffer holding a file that has one only matches if the comparison puts it
+  -- back before hashing. Real buffer, real option, no stub involved.
+  local bom_path = tmp .. "/bom.lua"
+  local bom_bytes = "\239\187\191local bom = 1\n"
+  local bom_handle = assert(io.open(bom_path, "wb"))
+  bom_handle:write(bom_bytes)
+  bom_handle:close()
+  local bom_buf = vim.fn.bufadd(bom_path)
+  vim.fn.bufload(bom_buf)
+  check("a marked buffer matches the bytes it was read from",
+    vim.bo[bom_buf].bomb and require("pair.marks").matches(bom_buf, vim.fn.sha256(bom_bytes)),
+    "bomb=" .. tostring(vim.bo[bom_buf].bomb))
+
   local first = decisions()[1]
   check("explanation is bound to the revision it describes",
     first and first.bindings["gen.lua"].revision == round_one_revision,
     first and tostring(first.bindings["gen.lua"].revision))
-  check("the comparison uses the change key, not the published revision",
-    first and first.bindings["gen.lua"].key == round_one_revision)
+  check("the explanation binds the reading it was written against",
+    first and first.bindings["gen.lua"].key == round_one_revision and first.bindings["gen.lua"].revision == round_one_revision)
   check("the transcript shows the revision the explanation refers to",
     wait_for("-> gen.lua  @" .. round_one_revision:sub(1, 8)))
 
   -- A commit leaves the changed set without touching the bytes. Real repository,
   -- real porcelain, driven on the tracker directly because no fake round needs to
-  -- change a file for this.
-  local committed = tmp .. "/observed.lua"
-  local handle = assert(io.open(committed, "wb"))
-  handle:write("local observed = 1\n")
-  handle:close()
-  vim.system({ "git", "-C", tmp, "add", "observed.lua" }):wait(5000)
+  -- change a file for this. The committed file is the one the explanation above
+  -- names, so what a commit does to that explanation is what this measures.
+  vim.system({ "git", "-C", tmp, "add", "gen.lua" }):wait(5000)
   session.changes:before("manual-1")
-  vim.system({ "git", "-C", tmp, "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-qm", "observe" }):wait(5000)
+  vim.system({ "git", "-C", tmp, "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-qm", "accept gen" }):wait(5000)
   session.changes:after("manual-1")
-  local observed_entry = session.file_log["observed.lua"]
+  local committed_entry = session.file_log["gen.lua"]
   check("a commit is observed as leaving the changed set",
-    observed_entry and observed_entry.status == "unchanged", observed_entry and observed_entry.status)
+    committed_entry and committed_entry.status == "unchanged", committed_entry and committed_entry.status)
   check("a commit reports the revision its bytes still have",
-    observed_entry and observed_entry.revision == vim.fn.sha256("local observed = 1\n"),
-    observed_entry and tostring(observed_entry.revision))
-  check("a commit is reported in the file list", wait_for("-> observed.lua"))
-  check("a commit does not mark an explanation out of date", not transcript():find("(changed since)", 1, true))
+    committed_entry and committed_entry.revision == round_one_revision,
+    committed_entry and tostring(committed_entry.revision))
+  check("a commit is reported in the file list", wait_for("Changes observed during tool manual-1"))
+  check("a commit of an explained file leaves the explanation current",
+    first.bindings["gen.lua"].revised == false and first.bindings["gen.lua"].gone == false,
+    first and ("revised=" .. tostring(first.bindings["gen.lua"].revised)))
+  check("nothing is marked changed since by a commit", not transcript():find("(changed since)", 1, true))
 else
   print("SKIP change observation: git is not installed")
 end
@@ -180,6 +194,13 @@ end
 -- Round 2: modified buffer must be protected.
 vim.api.nvim_buf_set_lines(genbuf, 0, -1, false, { "local draft = true" })
 check("test buffer is modified again", vim.bo[genbuf].modified)
+-- The commit above was observed with no measured change, and that observation
+-- cleared the marks for the revision the buffer held. Marks are placed again so
+-- that the conflict check below measures the conflict path rather than that
+-- earlier clear, and it is measured against a buffer that really carries them.
+require("pair.marks").apply(genbuf, { { new_start = 1, new_count = 1 } })
+check("the buffer carries marks for the revision it no longer holds",
+  #vim.api.nvim_buf_get_extmarks(genbuf, require("pair.marks").namespace(), 0, -1, {}) == 1)
 prompt("Change direction")
 release(2)
 if has_git then
@@ -190,7 +211,8 @@ if has_git then
   check("the bound revision is preserved, not rewritten",
     first and first.bindings["gen.lua"].revision == round_one_revision,
     first and tostring(first.bindings["gen.lua"].revision))
-  check("no marks are placed on a buffer that was not reloaded", #vim.api.nvim_buf_get_extmarks(genbuf, require("pair.marks").namespace(), 0, -1, {}) == 1)
+  check("marks for a superseded revision are cleared from the unsaved buffer",
+    #vim.api.nvim_buf_get_extmarks(genbuf, require("pair.marks").namespace(), 0, -1, {}) == 0)
 else
   print("SKIP unsaved-buffer guard: git is not installed")
 end
