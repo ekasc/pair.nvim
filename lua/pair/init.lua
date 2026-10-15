@@ -44,12 +44,20 @@ end
 
 function M.toggle()
   if not M.session then return M.start() end
-  if M.session.ui:is_open() then M.session.ui:close() else M.session.ui:open() end
+  if M.session.ui:is_open() then
+    M.session.ui:close()
+  elseif M.session.backend.job then
+    M.session.ui:open()
+  else
+    -- Pi exited: the sidebar it left behind cannot send, so :Pair opens a live
+    -- session instead of showing the dead one. M.start discards it.
+    M.start()
+  end
 end
 
 function M.ask()
   local context
-  if M.session then
+  if M.session and M.session.backend.job then
     context = M.session:context()
   else
     local root = project_root()

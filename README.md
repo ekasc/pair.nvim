@@ -55,7 +55,7 @@ Or add its root to `runtimepath` and run `:PairStart` (the `plugin/` entry point
 | `:PairSend` / `<C-s>` in composer | Send; if Pi is working, queue for after its run |
 | `:PairSteer` / `<C-t>` in composer | Steer; if working, deliver after current assistant turn's tool calls |
 | `:PairChanges` | Quickfix list of observed changes: one entry per hunk, or one entry saying why a diff is missing |
-| `:PairGroups` | Quickfix list grouped by decision: a header per stated decision with its files under it, then observed changes no decision names |
+| `:PairGroups` | Quickfix list grouped by decision: a header per decision that names files, with those files under it, then observed changes no decision names |
 | `:PairFollow` | Toggle automatic navigation to changed files |
 | `:PairInterrupt` | Explicitly abort the active Pi run |
 | `:PairStop` | Close Pi's stdin to request shutdown and close sidebar |
@@ -84,9 +84,9 @@ nvim --headless -l tests/integration.lua  # real plugin driven by a fake Pi RPC 
 bash tests/mutation-sweep.sh              # patches one behaviour at a time, expects checks to fail
 ```
 
-The logic suite runs under Lua 5.3 via `texlua` (28 checks). The integration suite runs the plugin inside headless Neovim with `tests/fake-pi.lua` standing in for `pi --mode rpc` (55 checks), so neither needs provider credentials or the `pi` CLI. The mutation sweep is a development tool: it patches one behaviour at a time, restores each file it patches, fails if any patch does not make the checks that cover it fail, and fails if it leaves the repository in a different state than it found it.
+The logic suite runs under Lua 5.3 via `texlua` (29 checks). The integration suite runs the plugin inside headless Neovim with `tests/fake-pi.lua` standing in for `pi --mode rpc` (60 checks), so neither needs provider credentials or the `pi` CLI. The mutation sweep is a development tool: it patches one behaviour at a time, restores each file it patches, fails if any patch does not make the checks that cover it fail, and fails if it leaves the repository in a different state than it found it.
 
-What the integration suite covers: session start, the first-prompt-only directive, streamed assistant text, decision records with linked files, tool-boundary change observation, line-level hunks at the expected offsets, changed-line marks in the file buffer, per-hunk quickfix entries, change groups with their decision headers and the section for observed changes no decision names, a group that reports how much of its evidence a later reading superseded, revision binding of explanations, staleness after a later edit, a real commit of an explained file that does not mark the explanation, a real removal that does, the silent reload of an unmodified buffer, the refusal to overwrite a modified one with its marks cleared, the refusal to abandon unsaved changes when opening a file, a byte-order mark matching its buffer, and shutdown.
+What the integration suite covers: session start, the first-prompt-only directive, streamed assistant text, decision records with linked files, tool-boundary change observation, line-level hunks at the expected offsets, changed-line marks in the file buffer, per-hunk quickfix entries, change groups with their decision headers and the section for observed changes no decision names, a group that reports how much of its evidence a later reading superseded, revision binding of explanations, staleness after a later edit, a real commit of an explained file that does not mark the explanation, a real removal that does, the silent reload of an unmodified buffer, the refusal to overwrite a modified one with its marks cleared, the refusal to abandon unsaved changes when opening a file, a byte-order mark matching its buffer, a sidebar whose Pi has exited being replaced rather than reopened, and shutdown.
 
 What it does not cover: extension dialogs, follow mode, and anything involving a live model. A real Neovim plus Pi acceptance pass with actual edits, steering and interruption is still required and has not been executed here.
 

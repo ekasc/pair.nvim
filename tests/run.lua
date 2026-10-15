@@ -302,6 +302,21 @@ test("a reading that leaves the changed set is reported apart from a removal", f
   assert(mark_calls[3].name == "mark_gone" and mark_calls[3].path == "src/b.lua", tostring(mark_calls[3] and mark_calls[3].name))
 end)
 
+test("a path reported without a reading ends the absence it was marked with", function()
+  entries, mark_calls = {}, {}
+  local session = Session.new("/repo", Config.options)
+  -- An explanation names a file that was already absent when it was recorded.
+  session.file_log["src/a.lua"] = { path = "src/a.lua", status = "gone", key = nil, revision = nil, hunks = {}, hunks_reason = "gone" }
+  session:files_changed({ { path = "src/a.lua", status = "gone", key = nil, revision = nil, hunks = {}, hunks_reason = "gone" } }, "tool-1")
+  assert(mark_calls[1].name == "mark_gone", tostring(mark_calls[1] and mark_calls[1].name))
+
+  -- A directory now sits at the path. Something is there, so the absence has
+  -- ended, but nothing was read, so no comparison is claimed either.
+  session:files_changed({ { path = "src/a.lua", status = "unreadable", key = nil, revision = nil, hunks = {}, hunks_reason = "not_a_file" } }, "tool-2")
+  assert(mark_calls[2].name == "mark_revised" and mark_calls[2].key == nil,
+    tostring(mark_calls[2] and mark_calls[2].name))
+end)
+
 test("a tool end with no window is reported instead of attributed", function()
   entries = {}
   local session = Session.new("/repo", Config.options)
@@ -357,7 +372,7 @@ test("observed changes are grouped under the decisions that name their files", f
     ["zz.lua"] = { path = "zz.lua", status = "changed", key = "rev-4", revision = "rev-4", hunks = {} },
   }
   local decisions = {
-    { title = "Atomic updates", files = { "src/a.lua", "src/never.lua" },
+    { title = "Atomic updates", files = { "src/a.lua", "src/never.lua", "src/a.lua" },
       bindings = { ["src/a.lua"] = { key = "rev-1", revision = "rev-1", revised = true } } },
     { title = "Queueing", files = { "src/a.lua" },
       bindings = { ["src/a.lua"] = { key = "rev-2", revision = "rev-2" } } },
@@ -368,7 +383,8 @@ test("observed changes are grouped under the decisions that name their files", f
   assert(#groups == 2, "groups: " .. #groups)
   assert(groups[1].title == "Atomic updates", tostring(groups[1].title))
   -- One file can be named by more than one decision. Each group reports it and
-  -- reports its own binding for it rather than a shared verdict.
+  -- reports its own binding for it rather than a shared verdict. A decision that
+  -- names one path twice names one file, so it is counted once with its hunks.
   assert(#groups[1].files == 2 and #groups[2].files == 1, "files per group")
   assert(groups[1].files[1].entry == log["src/a.lua"], "the group refers to the reading itself")
   assert(groups[1].files[1].superseded == true, "the mark of the decision that moved")

@@ -106,6 +106,14 @@ run_one "a group lists paths no decision names" lua/pair/groups.lua \
   's/    if not claimed\[path\] then unclaimed\[#unclaimed \+ 1\] = Groups\.file\(path, entry, nil\) end/    if false then unclaimed[#unclaimed + 1] = Groups.file(path, entry, nil) end/' "$INTEG"
 run_one "a group reports superseded evidence" lua/pair/groups.lua \
   's/    superseded = binding ~= nil and binding\.revised == true/    superseded = false/' "$INTEG"
+run_one "a reported path that is not readable ends its absence" lua/pair/session.lua \
+  's/      self\.ui:mark_revised\(file, nil\)/      self.ui:mark_gone(file)/' "$LOGIC"
+run_one "a decision naming one path twice names one file" lua/pair/groups.lua \
+  's/        if not named_once\[path\] then/        if true then/' "$LOGIC"
+run_one "a dead backend is not reopened" lua/pair/init.lua \
+  's/  elseif M\.session\.backend\.job then/  elseif true then/' "$INTEG"
+run_one "a dead backend is not asked" lua/pair/init.lua \
+  's/  if M\.session and M\.session\.backend\.job then/  if M.session then/' "$INTEG"
 
 rm -rf "$work"
 if command -v git >/dev/null 2>&1 && [ "$(git status --porcelain)" != "$state_before" ]; then

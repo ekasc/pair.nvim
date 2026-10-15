@@ -236,6 +236,13 @@ function Session:files_changed(entries, tool_id, unavailable)
       -- No key exists to compare with, but the file an explanation names is no
       -- longer there, which is its own fact.
       self.ui:mark_gone(file)
+    else
+      -- The window reported this path, so something is at it and the absence an
+      -- explanation recorded has ended. Nothing was read, because a directory,
+      -- a submodule or a file that cannot be opened is not a reading, so no
+      -- comparison is claimed either: no key means the explanation stops being
+      -- marked as stale without being called current.
+      self.ui:mark_revised(file, nil)
     end
     self:refresh_buffer(file, entry)
   end

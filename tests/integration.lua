@@ -342,8 +342,29 @@ end
 
 -- Teardown: closing stdin must end the process rather than leave it running.
 local backend = session.backend
-pair.stop()
+backend:stop()
 check("closing stdin stops the fake Pi process", vim.wait(5000, function() return backend.job == nil end, 20))
+
+-- A sidebar whose Pi has exited cannot send, so :Pair opens a live session
+-- instead of showing the dead one again.
+ui:close()
+pair.toggle()
+check(":Pair discards a session whose Pi has exited", pair.session ~= nil and pair.session ~= session)
+check(":Pair opens a sidebar whose backend is running",
+  pair.session ~= nil and pair.session.backend.job ~= nil and pair.session.ui:is_open())
+
+-- :PairAsk follows the same rule: a composer on a dead session cannot send.
+local replacement = pair.session
+replacement.backend:stop()
+vim.wait(5000, function() return replacement.backend.job == nil end, 20)
+pair.ask()
+check(":PairAsk discards a session whose Pi has exited", pair.session ~= nil and pair.session ~= replacement)
+check(":PairAsk opens a composer whose backend is running",
+  pair.session ~= nil and pair.session.backend.job ~= nil and pair.session.ui:is_open())
+
+local asked = pair.session
+pair.stop()
+check("the replacement sessions are stopped", vim.wait(5000, function() return asked.backend.job == nil end, 20))
 
 vim.fn.delete(tmp, "rf")
 print(("\n%d passed, %d failed"):format(checks - failures, failures))
