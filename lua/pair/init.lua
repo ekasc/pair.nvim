@@ -89,13 +89,31 @@ function M.interrupt()
   if not ok then notify(err, vim.log.levels.ERROR) end
 end
 
+local function hunk_text(entry, hunk)
+  if hunk.new_count == 0 then
+    return ("%s: %d line%s removed"):format(entry.status, hunk.old_count, hunk.old_count == 1 and "" or "s")
+  end
+  return ("%s: %d changed line%s"):format(entry.status, hunk.new_count, hunk.new_count == 1 and "" or "s")
+end
+
 function M.changes()
   if not M.session then return end
-  local paths = M.session:files()
-  if #paths == 0 then return notify("No observed changed files yet") end
+  local entries = M.session:file_entries()
+  if #entries == 0 then return notify("No observed changed files yet") end
   local items = {}
-  for _, file in ipairs(paths) do
-    items[#items + 1] = { filename = M.session.root .. "/" .. file, lnum = 1, text = "Observed change" }
+  for _, entry in ipairs(entries) do
+    local filename = M.session.root .. "/" .. entry.path
+    if #entry.hunks == 0 then
+      items[#items + 1] = { filename = filename, lnum = 1, text = "Observed change (" .. entry.status .. ")" }
+    else
+      for _, hunk in ipairs(entry.hunks) do
+        items[#items + 1] = {
+          filename = filename,
+          lnum = math.max(hunk.new_start or 1, 1),
+          text = hunk_text(entry, hunk),
+        }
+      end
+    end
   end
   vim.fn.setqflist({}, "r", { title = "Pair observed changes", items = items })
   vim.cmd("copen")

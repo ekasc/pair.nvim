@@ -81,7 +81,7 @@ check("RPC state response is shown", wait_for("Session: fake-session"))
 -- A pre-existing, unmodified buffer for a file the fake is about to rewrite.
 -- bufadd/bufload loads it without disturbing the sidebar windows.
 local initial = assert(io.open(generated, "wb"))
-initial:write("initial\n")
+initial:write("alpha\nbeta\ngamma\n")
 initial:close()
 local genbuf = vim.fn.bufadd(generated)
 vim.fn.bufload(genbuf)
@@ -91,12 +91,26 @@ check("test buffer is loaded and unmodified", vim.api.nvim_buf_is_loaded(genbuf)
 local autoread_before = vim.bo[genbuf].autoread
 
 -- Round 1: unmodified buffer.
+local round_one_content = "alpha\nBETA CHANGED\ngamma\n"
+local round_one_revision = vim.fn.sha256(round_one_content)
+local function decisions()
+  local found = {}
+  for _, entry in ipairs(ui.entries) do
+    if entry.role == "decision" then found[#found + 1] = entry end
+  end
+  return found
+end
+local function buffer_text(buf)
+  return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n") .. "\n"
+end
+
 prompt("Implement the thing")
 check("composer clears after send", vim.api.nvim_buf_get_lines(ui.input_buf, 0, -1, false)[1] == "")
+check("agent narrates before acting", wait_for("Checking round 1."))
+release(1)
 check("assistant text streams into the transcript", wait_for("Working on round 1."))
 check("decision record becomes a timeline entry", wait_for("Round 1 decision"))
 check("decision links its file", wait_for("-> gen.lua"))
-release(1)
 check("agent settles after the tool call", wait_for("Agent idle"))
 
 if has_git then
@@ -108,11 +122,33 @@ if has_git then
   end, 20))
   check("change is reported as observation, not authorship", wait_for("not proof of authorship"))
   check("unmodified buffer silently reloads from disk", vim.wait(8000, function()
-    local lines = vim.api.nvim_buf_get_lines(genbuf, 0, -1, false)
-    return table.concat(lines, "\n"):find("generated round 1", 1, true) ~= nil
+    return buffer_text(genbuf):find("BETA CHANGED", 1, true) ~= nil
   end, 20))
   check("borrowed buffer option is restored", vim.bo[genbuf].autoread == autoread_before,
     "expected " .. tostring(autoread_before) .. ", left as " .. tostring(vim.bo[genbuf].autoread))
+
+  local entry = session.file_log["gen.lua"]
+  check("buffer holds the observed revision", buffer_text(genbuf) == round_one_content, buffer_text(genbuf))
+  check("observation records that revision", entry and entry.revision == round_one_revision,
+    entry and entry.revision)
+
+  local hunk = entry and entry.hunks[1]
+  check("hunk locates the exact edited line",
+    hunk and hunk.old_start == 2 and hunk.old_count == 1 and hunk.new_start == 2 and hunk.new_count == 1,
+    vim.inspect(entry and entry.hunks))
+
+  local marked = vim.api.nvim_buf_get_extmarks(genbuf, require("pair.marks").namespace(), 0, -1, {})
+  check("changed line is marked in the buffer", #marked == 1 and marked[1][2] == 1, vim.inspect(marked))
+
+  pair.changes()
+  local quickfix = vim.fn.getqflist()
+  vim.cmd("cclose")
+  check("quickfix points at the changed line", quickfix[1] and quickfix[1].lnum == 2, vim.inspect(quickfix[1]))
+
+  local first = decisions()[1]
+  check("explanation is bound to the revision it describes",
+    first and first.revisions["gen.lua"] == round_one_revision,
+    first and tostring(first.revisions["gen.lua"]))
 else
   print("SKIP change observation: git is not installed")
 end
@@ -125,6 +161,12 @@ release(2)
 if has_git then
   check("unsaved buffer is reported as a conflict", wait_for("Unsaved buffer conflicts with disk change: gen.lua"))
   check("unsaved buffer is not overwritten", table.concat(vim.api.nvim_buf_get_lines(genbuf, 0, -1, false), "\n") == "local draft = true")
+  check("the earlier explanation is now marked stale", wait_for("(changed since)"))
+  local first = decisions()[1]
+  check("the bound revision is preserved, not rewritten",
+    first and first.revisions["gen.lua"] == round_one_revision,
+    first and tostring(first.revisions["gen.lua"]))
+  check("no marks are placed on a buffer that was not reloaded", #vim.api.nvim_buf_get_extmarks(genbuf, require("pair.marks").namespace(), 0, -1, {}) == 1)
 else
   print("SKIP unsaved-buffer guard: git is not installed")
 end

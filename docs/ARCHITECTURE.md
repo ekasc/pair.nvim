@@ -37,25 +37,37 @@ The Pi subprocess is the only model-bearing actor. The Neovim controller has no 
 
 One logical intent can span schema, backend, frontend and test files. A `PAIR_DECISION:` record contains a title, why and affected paths. Independent Git change checkpoints capture *observed* paths. The UI joins these conceptually without asserting perfect correspondence.
 
-### Important next improvement
+Each observation carries, per file, a revision and the hunks between revisions:
 
-Represent **change groups** as durable objects, not message strings:
+```text
+Observation {
+  path,
+  status,             -- appeared | changed | disappeared
+  revision,           -- SHA-256 of the bytes; size:mtime above the size ceiling; nil if gone
+  previous_revision,
+  hunks: [{old_start, old_count, new_start, new_count}]
+}
+```
+
+Leaving the dirty set is reported as `disappeared` rather than `deleted`, because a commit produces the same status output as a removal. Reading the bytes settles what the status cannot: unchanged bytes mean the revision an explanation refers to still exists, changed bytes mean a revert replaced it, and no file at all leaves nothing to compare against. The last two mark the explanation as changed since; a commit marks nothing.
+
+Hunk ranges would go stale as later edits move code, so they are never reused across observations. Instead an explanation records the revision of each file it names, and a later observation at a different revision marks that explanation as changed since. The bound revision is kept as written, so the transcript keeps saying both what was explained and what has happened to it since.
+
+### Still wanted
+
+Grouping observations into a durable object, and recording verification:
 
 ```text
 ChangeGroup {
-  id,
-  intent,
-  start_revision,
-  end_revision,
-  actual_hunks: [{path, old_range, new_range, checksum}],
-  agent_rationale: {message_id, text},
+  id, intent,
+  actual_hunks: [...],
   related_decisions: [...],
   verification: {commands, observed_outcomes},
   stale: boolean
 }
 ```
 
-This must remain a *view* over real file and tool evidence. An agent-provided path should never be silently treated as proof of modification. Hunk ranges need revision hashes because subsequent edits may move the code. Untracked files, renames, deletions, in-progress writes and unrelated user edits need explicit handling.
+This must remain a *view* over real file and tool evidence. An agent-provided path should never be silently treated as proof of modification. Untracked files, renames, in-progress writes and unrelated user edits are currently handled only at the level of "this file looked different across the tool boundary".
 
 ## Protocol baseline
 
@@ -76,7 +88,7 @@ Upstream references:
 
 ## Known limitations and edge cases
 
-- The Git observer is synchronous on tool boundaries. Optimize asynchronously if large repositories show editor stalls; take snapshots at correct temporal boundaries and test overlap.
+- The Git observer is synchronous on tool boundaries, and it now reads file content to produce hunks. Content retention is bounded per checkpoint (8 MB total, 2 MB per file); files beyond that, or above the size ceiling, still get a revision but no hunks. Optimize asynchronously if large repositories show editor stalls.
 - Git dirtiness is not equivalent to provenance. A user edit occurring during the tool window can be observed too.
 - Existing non-Git workspaces are not tracked. Git worktrees with `.git` files are recognized for root discovery.
 - Full-file writes may be atomic; file system watchers won't necessarily provide each intermediate line. The intended UX is revision-level diff streaming plus explanations, not simulated keystrokes.
@@ -88,7 +100,7 @@ Upstream references:
 ## Test strategy
 
 1. Portable isolated module tests: JSONL fragmentation, id correlation, follow-up vs steer, decision parsing including pipes inside rationale, first-turn directive, file scanning including renames and spaces, and degraded observation when Git is unavailable.
-2. Neovim headless integration with a fake Pi process (`tests/integration.lua`): sidebar open, expected chat lines, one-time directive, tool-boundary change observation, silent reload versus modified-buffer refusal, option restoration, and shutdown. Extension dialogs and follow mode are not yet covered.
+2. Neovim headless integration with a fake Pi process (`tests/integration.lua`): sidebar open, expected chat lines, one-time directive, tool-boundary change observation with hunk offsets and changed-line marks, revision binding and staleness, silent reload versus modified-buffer refusal, option restoration, and shutdown. Extension dialogs and follow mode are not yet covered, and the suite never commits, so a file leaving the dirty set is covered only in tier 1 against stubbed git output.
 3. Live Pi smoke test with a synthetic Git repo: design discussion, file edits, one follow-up, one steer, verification and stop.
 4. Visual interactive acceptance in Neovim: work in an unrelated buffer while agent edits, explore versus follow behavior, hunk navigation, restoring focus, and model/provider error recovery.
 

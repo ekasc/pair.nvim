@@ -8,6 +8,12 @@
 local file = assert(os.getenv("FAKE_PI_FILE"), "FAKE_PI_FILE is not set")
 local log_path = assert(os.getenv("FAKE_PI_LOG"), "FAKE_PI_LOG is not set")
 
+-- Round-specific content so the expected hunk offsets are fixed, not emergent.
+local EDIT_CONTENT = {
+  "alpha\nBETA CHANGED\ngamma\n",
+  "alpha\nBETA CHANGED\ngamma\ndelta\n",
+}
+
 local log = assert(io.open(log_path, "ab"))
 local round = 0
 
@@ -49,10 +55,8 @@ local function handle(line)
   respond(line, '{"disposition":"queued"}')
   send('{"type":"agent_start"}')
   send('{"type":"message_start","message":{"role":"assistant","content":{}}}')
-  send('{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Working on round ' .. round .. '."}}')
-  send(('{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}'):format(escape(
-    "Working on round " .. round .. ".\nPAIR_DECISION: Round " .. round
-    .. " decision | Fake rationale for the headless test | gen.lua")))
+  send('{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Checking round ' .. round .. '."}}')
+  send(('{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Checking round %d."}]}}'):format(round))
 
   send(('{"type":"tool_execution_start","toolCallId":"call-%d","toolName":"write-%d"}'):format(round, round))
   -- Block until the host answers. By then it has already taken its
@@ -65,10 +69,18 @@ local function handle(line)
   if request_type(gate) == "get_state" then respond(gate, '{"sessionId":"fake-session"}') end
 
   local handle = assert(io.open(file, "wb"))
-  handle:write("generated round " .. round .. "\n")
+  handle:write(EDIT_CONTENT[round] or ("round " .. round .. "\n"))
   handle:close()
 
   send(('{"type":"tool_execution_end","toolCallId":"call-%d","toolName":"write-%d","isError":false}'):format(round, round))
+
+  -- The explanation arrives after the edit, so it binds to the revision that
+  -- edit produced rather than the one before it.
+  send('{"type":"message_start","message":{"role":"assistant","content":{}}}')
+  send('{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Working on round ' .. round .. '."}}')
+  send(('{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}'):format(escape(
+    "Working on round " .. round .. ".\nPAIR_DECISION: Round " .. round
+    .. " decision | Fake rationale for the headless test | gen.lua")))
   send('{"type":"agent_settled"}')
   return "ok"
 end

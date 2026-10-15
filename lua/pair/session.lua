@@ -2,6 +2,7 @@ local Pi = require("pair.pi")
 local Ui = require("pair.ui")
 local Changes = require("pair.changes")
 local Directive = require("pair.directive")
+local Marks = require("pair.marks")
 
 local Session = {}
 Session.__index = Session
@@ -59,7 +60,7 @@ end
 function Session.new(root, config)
   local self = setmetatable({
     root = root, config = config, initialized = false, follow = config.follow_edits,
-    file_log = {}, status = "idle", active_message = nil, backend = nil,
+    file_log = {}, revisions = {}, status = "idle", active_message = nil, backend = nil,
   }, Session)
   self.ui = Ui.new(config.ui,
     function(text, steer, context) return self:submit(text, steer, context) end,
@@ -138,7 +139,11 @@ function Session:on_event(kind, event)
     end
     self.active_message = nil
     for _, decision in ipairs(collect_decisions(text)) do
-      self.ui:add("decision", decision.title .. "\n" .. decision.rationale, decision.files)
+      -- Bind the explanation to the revision of each file it names, so a later
+      -- edit can be recognised as having invalidated it.
+      local revisions = {}
+      for _, path in ipairs(decision.files) do revisions[path] = self.revisions[path] end
+      self.ui:add("decision", decision.title .. "\n" .. decision.rationale, decision.files, revisions)
     end
     self.ui:request_render()
   elseif event.type == "tool_execution_start" then
@@ -190,26 +195,47 @@ function Session:extension_dialog(event)
   self.backend:reply(event.id, { cancelled = true })
 end
 
-function Session:files_changed(files, tool_id)
-  self.ui:add("files", "Changes observed during tool " .. tostring(tool_id) .. " (not proof of authorship):", files)
-  for _, file in ipairs(files) do
-    self.file_log[file] = true
-    local full = self.root .. "/" .. file
-    local bufnr = vim.fn.bufnr(full)
-    if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
-      if vim.bo[bufnr].modified then
-        self.ui:add("status", "Unsaved buffer conflicts with disk change: " .. file)
-      else
-        -- Force one silent reload, then put the user's option back. Observation
-        -- must not leave editor settings changed behind it.
-        local autoread = vim.bo[bufnr].autoread
-        vim.bo[bufnr].autoread = true
-        vim.api.nvim_buf_call(bufnr, function() vim.cmd("silent! checktime") end)
-        vim.bo[bufnr].autoread = autoread
-      end
+function Session:files_changed(entries, tool_id)
+  local paths = {}
+  for _, entry in ipairs(entries) do paths[#paths + 1] = entry.path end
+  self.ui:add("files", "Changes observed during tool " .. tostring(tool_id) .. " (not proof of authorship):", paths)
+  for _, entry in ipairs(entries) do
+    local file = entry.path
+    self.file_log[file] = entry
+    if entry.revision then
+      self.revisions[file] = entry.revision
+      -- An explanation recorded against an older revision no longer describes
+      -- what is on disk. When the revision is unchanged this call changes
+      -- nothing, so a commit does not invalidate anything.
+      self.ui:mark_stale(file, entry.revision)
+    elseif entry.status == "disappeared" then
+      -- The file is gone, so no revision exists that an explanation could still
+      -- be describing.
+      self.revisions[file] = nil
+      self.ui:mark_stale(file, nil)
     end
+    self:refresh_buffer(file, entry)
   end
-  if self.follow and #files > 0 then self:open_file(files[#files]) end
+  if self.follow and #entries > 0 then self:open_file(entries[#entries].path) end
+end
+
+function Session:refresh_buffer(file, entry)
+  local full = self.root .. "/" .. file
+  local bufnr = vim.fn.bufnr(full)
+  if bufnr == -1 or not vim.api.nvim_buf_is_loaded(bufnr) then return end
+  if vim.bo[bufnr].modified then
+    self.ui:add("status", "Unsaved buffer conflicts with disk change: " .. file)
+    return
+  end
+  -- Force one silent reload, then put the user's option back. Observation
+  -- must not leave editor settings changed behind it.
+  local autoread = vim.bo[bufnr].autoread
+  vim.bo[bufnr].autoread = true
+  vim.api.nvim_buf_call(bufnr, function() vim.cmd("silent! checktime") end)
+  vim.bo[bufnr].autoread = autoread
+  -- Marks describe line numbers in the revision just observed, so they are only
+  -- placed once the buffer actually holds that revision.
+  if not vim.bo[bufnr].modified then Marks.apply(bufnr, entry.hunks) end
 end
 
 function Session:open_file(file)
@@ -242,6 +268,12 @@ function Session:open_file(file)
   -- keymap or an event callback.
   if not pcall(vim.cmd, "edit " .. vim.fn.fnameescape(full)) then
     self.ui:add("status", "Refused to open " .. file .. ": the target window has unsaved changes")
+    return
+  end
+  local entry = self.file_log[file]
+  if entry then
+    local bufnr = vim.api.nvim_get_current_buf()
+    if not vim.bo[bufnr].modified then Marks.apply(bufnr, entry.hunks) end
   end
 end
 
@@ -253,6 +285,13 @@ function Session:files()
   local paths = vim.tbl_keys(self.file_log)
   table.sort(paths)
   return paths
+end
+
+function Session:file_entries()
+  local entries = {}
+  for _, entry in pairs(self.file_log) do entries[#entries + 1] = entry end
+  table.sort(entries, function(a, b) return a.path < b.path end)
+  return entries
 end
 
 return Session

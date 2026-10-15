@@ -9,7 +9,9 @@ A native Neovim interface for **pair programming with one existing coding agent*
 - A configurable pair-programming directive is sent only with the **first user prompt** in the session, without replacing Pi's system instructions or installing extensions.
 - Significant decisions can appear in a timeline, with rationale and linked files, when the model emits `PAIR_DECISION:` records.
 - Git-working-tree file changes are observed around tool execution and grouped by execution event (not falsely attributed as proven agent edits).
-- `:PairChanges` opens all observed files in quickfix; `<CR>` on a file in the chat opens it in the editor.
+- Each observation carries a real line-level diff and a content revision. Changed lines are highlighted in the file buffer, and `:PairChanges` lists one quickfix entry per hunk.
+- An explanation is bound to the revision of each file it names, so a later edit, revert or removal marks it as changed since rather than silently reusing the old rationale.
+- `:PairChanges` opens all observed changes in quickfix; `<CR>` on a file in the chat opens it in the editor.
 - User questions are **follow-ups** by default while the agent is working. Explicit steering enters at the next Pi turn boundary.
 - Follow mode is opt-in, so the agent does not seize the buffer you are reading.
 - Buffers with unsaved changes are never force-reloaded.
@@ -17,7 +19,7 @@ A native Neovim interface for **pair programming with one existing coding agent*
 ## Requirements
 
 - Neovim 0.10+ and the `pi` CLI installed **by you**, configured with your normal model/provider credentials.
-- Git for multi-file change observation (without Git, Pi chat still works but working-tree tracking is unavailable).
+- Git for multi-file change observation. Without Git, Pi chat still works but working-tree tracking is unavailable, including line-level hunks and revision binding.
 - No daemon, npm package, model, or separate language server is installed by this plugin.
 
 ## Install
@@ -51,7 +53,7 @@ Or add its root to `runtimepath` and run `:PairStart` (the `plugin/` entry point
 | `:PairContext` | Refresh the composer context from the current editor window |
 | `:PairSend` / `<C-s>` in composer | Send; if Pi is working, queue for after its run |
 | `:PairSteer` / `<C-t>` in composer | Steer; if working, deliver after current assistant turn's tool calls |
-| `:PairChanges` | Quickfix list of observed modified files |
+| `:PairChanges` | Quickfix list of observed changes, one entry per hunk |
 | `:PairFollow` | Toggle automatic navigation to changed files |
 | `:PairInterrupt` | Explicitly abort the active Pi run |
 | `:PairStop` | Close Pi's stdin to request shutdown and close sidebar |
@@ -69,7 +71,7 @@ This is a **first vertical slice**, not a production-ready plugin:
 4. Rationales are *visible explanations* provided by the working agent, not access to hidden model reasoning. Decision records are best-effort, and cross-file links provided by the model must be checked against actual code.
 5. The single model cannot answer a second prompt concurrently with an ongoing generation. A follow-up answers when the active run finishes; steer processes at a supported turn boundary. No extra model, session fork, or synthetic summary is created.
 6. Pi extensions requiring direct TUI capabilities may not work in RPC mode. Basic extension dialogs are bridged via `vim.ui.*`.
-7. A long chat currently renders into a capped Neovim scratch buffer; richer diff hunks, visual extmarks and durable custom timeline storage are future work.
+7. A long chat currently renders into a capped Neovim scratch buffer. Rendering hunks inside the transcript, and durable timeline storage across restarts, are still future work. Changed-line marks live in the file buffers instead.
 8. Current UI operates on the same machine/filesystem as Neovim. Remote execution adapters are not built in.
 
 ## Verification
@@ -81,12 +83,12 @@ nvim --headless -l tests/integration.lua  # real plugin driven by a fake Pi RPC 
 
 The logic suite runs under Lua 5.3 via `texlua`. The integration suite runs the plugin inside headless Neovim with `tests/fake-pi.lua` standing in for `pi --mode rpc`, so neither needs provider credentials or the `pi` CLI.
 
-What the integration suite covers: session start, the first-prompt-only directive, streamed assistant text, decision records with linked files, tool-boundary change observation, the silent reload of an unmodified buffer, the refusal to overwrite a modified one, the refusal to abandon unsaved changes when opening a file, and shutdown.
+What the integration suite covers: session start, the first-prompt-only directive, streamed assistant text, decision records with linked files, tool-boundary change observation, line-level hunks at the expected offsets, changed-line marks in the file buffer, per-hunk quickfix entries, revision binding of explanations, staleness after a later edit, the silent reload of an unmodified buffer, the refusal to overwrite a modified one, the refusal to abandon unsaved changes when opening a file, and shutdown.
 
 What it does not cover: extension dialogs, follow mode, and anything involving a live model. A real Neovim plus Pi acceptance pass with actual edits, steering and interruption is still required and has not been executed here.
 
 ## Development sequence
 
-- **Now:** chat + Pi RPC + queued and steering prompts + coarse multi-file tracking + linked decisions.
-- **Next:** reliable per-tool code-hunk snapshots, changed-line extmarks and code-window follow behavior, then session-history recovery.
+- **Now:** chat + Pi RPC + queued and steering prompts + per-tool hunk observation with revision-bound explanations + linked decisions.
+- **Next:** session-history recovery, and rendering hunks inside the transcript instead of only in the file buffers.
 - **Afterward:** OpenCode adapter, Git-independent watchers, richer what-if navigation, and automated end-to-end tests with real Pi.

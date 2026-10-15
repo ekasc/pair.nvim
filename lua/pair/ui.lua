@@ -123,12 +123,27 @@ function Ui:send(steer)
   end
 end
 
-function Ui:add(role, text, files)
-  local entry = { role = role, text = text or "", files = files or {} }
+function Ui:add(role, text, files, revisions)
+  local entry = { role = role, text = text or "", files = files or {}, revisions = revisions or {} }
   self.entries[#self.entries + 1] = entry
   if #self.entries > self.options.max_entries then table.remove(self.entries, 1) end
   self:request_render()
   return entry
+end
+
+-- Called when a file is observed at a new revision. Any explanation bound to a
+-- different revision no longer describes what is on disk.
+function Ui:mark_stale(path, revision)
+  local marked = 0
+  for _, entry in ipairs(self.entries) do
+    local bound = entry.revisions and entry.revisions[path]
+    if bound and bound ~= revision then
+      entry.stale = entry.stale or {}
+      entry.stale[path] = true
+      marked = marked + 1
+    end
+  end
+  return marked
 end
 
 function Ui:request_render()
@@ -151,7 +166,11 @@ function Ui:render()
       lines[#lines + 1] = line
     end
     for _, file in ipairs(entry.files or {}) do
-      lines[#lines + 1] = "  -> " .. file
+      local line = "  -> " .. file
+      local revision = entry.revisions and entry.revisions[file]
+      if revision then line = line .. "  @" .. revision:sub(1, 8) end
+      if entry.stale and entry.stale[file] then line = line .. "  (changed since)" end
+      lines[#lines + 1] = line
       targets[#lines] = file
     end
     lines[#lines + 1] = ""
