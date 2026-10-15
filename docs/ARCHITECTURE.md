@@ -87,9 +87,9 @@ Upstream references:
 
 ## Test strategy
 
-1. Portable isolated module tests: JSONL fragmentation, id correlation, follow-up vs steer, decision parsing, first-turn directive, file scanning including renames and spaces.
-2. Neovim headless integration with fake Pi process: sidebar open/close, expected chat lines, tool-boundary refresh, unsaved-buffer guard, extension dialogs.
+1. Portable isolated module tests: JSONL fragmentation, id correlation, follow-up vs steer, decision parsing including pipes inside rationale, first-turn directive, file scanning including renames and spaces, and degraded observation when Git is unavailable.
+2. Neovim headless integration with a fake Pi process (`tests/integration.lua`): sidebar open, expected chat lines, one-time directive, tool-boundary change observation, silent reload versus modified-buffer refusal, option restoration, and shutdown. Extension dialogs and follow mode are not yet covered.
 3. Live Pi smoke test with a synthetic Git repo: design discussion, file edits, one follow-up, one steer, verification and stop.
 4. Visual interactive acceptance in Neovim: work in an unrelated buffer while agent edits, explore versus follow behavior, hunk navigation, restoring focus, and model/provider error recovery.
 
-Tests (1) exist and pass under `texlua`. Tests (2)–(4) require local Neovim/agent runtime and are not claimed as executed here.
+Tests (1) and (2) exist and pass: `texlua tests/run.lua` and `nvim --headless -l tests/integration.lua`. Tests (3)–(4) require a live agent and are not claimed as executed here.

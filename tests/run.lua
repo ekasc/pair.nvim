@@ -134,6 +134,30 @@ test("Pi reports a closed channel instead of raising on send and reply", functio
   assert(reply_ok == false)
 end)
 
+test("stopping Pi reaps a process that ignores stdin closure", function()
+  local scheduled, reaped = nil, {}
+  local saved = { defer_fn = vim.defer_fn, jobstop = vim.fn.jobstop, chanclose = vim.fn.chanclose }
+  vim.defer_fn = function(fn, ms) scheduled = { fn = fn, ms = ms } end
+  vim.fn.jobstop = function(job) reaped[#reaped + 1] = job return 1 end
+  vim.fn.chanclose = function() return 1 end
+
+  local pi = Pi.new({}, function() end)
+  pi.job = 4242
+  pi:stop()
+  local delay = scheduled and scheduled.ms
+  if scheduled then scheduled.fn() end
+  local first_reap = reaped[1]
+  pi.job = nil -- on_exit fired before the fallback ran
+  if scheduled then scheduled.fn() end
+  local total_reaps = #reaped
+
+  vim.defer_fn, vim.fn.jobstop, vim.fn.chanclose = saved.defer_fn, saved.jobstop, saved.chanclose
+
+  assert(delay == 3000, "a bounded fallback must be scheduled")
+  assert(first_reap == 4242, "a process still running must be terminated")
+  assert(total_reaps == 1, "a process that already exited must not be terminated twice")
+end)
+
 test("Pi extension replies preserve the originating dialog ID", function()
   sent = {}
   local pi = Pi.new({}, function() end)

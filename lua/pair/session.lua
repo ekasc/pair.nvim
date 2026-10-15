@@ -200,8 +200,12 @@ function Session:files_changed(files, tool_id)
       if vim.bo[bufnr].modified then
         self.ui:add("status", "Unsaved buffer conflicts with disk change: " .. file)
       else
+        -- Force one silent reload, then put the user's option back. Observation
+        -- must not leave editor settings changed behind it.
+        local autoread = vim.bo[bufnr].autoread
         vim.bo[bufnr].autoread = true
         vim.api.nvim_buf_call(bufnr, function() vim.cmd("silent! checktime") end)
+        vim.bo[bufnr].autoread = autoread
       end
     end
   end
@@ -233,7 +237,12 @@ function Session:open_file(file)
   end
   if not win then return end
   vim.api.nvim_set_current_win(win)
-  vim.cmd("edit " .. vim.fn.fnameescape(full))
+  -- `:edit` refuses to abandon a modified buffer. That refusal is intended, but
+  -- it must surface as a reported outcome rather than as E37 thrown out of a
+  -- keymap or an event callback.
+  if not pcall(vim.cmd, "edit " .. vim.fn.fnameescape(full)) then
+    self.ui:add("status", "Refused to open " .. file .. ": the target window has unsaved changes")
+  end
 end
 
 function Session:context()

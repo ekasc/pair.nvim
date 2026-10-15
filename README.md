@@ -74,15 +74,16 @@ This is a **first vertical slice**, not a production-ready plugin:
 
 ## Verification
 
-Run the portable logic suite (Lua 5.3 via `texlua` is sufficient):
-
 ```sh
-texlua tests/run.lua
+texlua tests/run.lua                      # portable logic suite, no Neovim required
+nvim --headless -l tests/integration.lua  # real plugin driven by a fake Pi RPC process
 ```
 
-A real Neovim+Pi RPC end-to-end acceptance run is still required.
+The logic suite runs under Lua 5.3 via `texlua`. The integration suite runs the plugin inside headless Neovim with `tests/fake-pi.lua` standing in for `pi --mode rpc`, so neither needs provider credentials or the `pi` CLI.
 
-These tests mock Pi events and do not need provider credentials.
+What the integration suite covers: session start, the first-prompt-only directive, streamed assistant text, decision records with linked files, tool-boundary change observation, the silent reload of an unmodified buffer, the refusal to overwrite a modified one, the refusal to abandon unsaved changes when opening a file, and shutdown.
+
+What it does not cover: extension dialogs, follow mode, and anything involving a live model. A real Neovim plus Pi acceptance pass with actual edits, steering and interruption is still required and has not been executed here.
 
 ## Development sequence
 

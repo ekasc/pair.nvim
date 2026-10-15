@@ -133,6 +133,12 @@ function Pi:stop()
   local job = self.job
   -- Pi treats a closed stdin as a request for orderly shutdown.
   pcall(vim.fn.chanclose, job, "stdin")
+  -- Fallback: a process that ignores that request must not linger and hold a
+  -- provider session open. on_exit clears self.job, so this fires only if the
+  -- same process is still running.
+  vim.defer_fn(function()
+    if self.job == job then pcall(vim.fn.jobstop, job) end
+  end, 3000)
 end
 
 return Pi
