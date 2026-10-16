@@ -280,6 +280,23 @@ test("session never sends hidden model thinking deltas to UI", function()
   assert(entries[#entries].text == "Visible explanation")
 end)
 
+test("a turn that failed at the provider is reported with its reason", function()
+  entries = {}
+  local session = Session.new("/repo", Config.options)
+  -- Pi sends the failure on the assistant message, whose content is empty, and
+  -- the prompt command itself still reports success.
+  session:on_event("event", { type = "message_start", message = { role = "assistant", content = {} } })
+  session:on_event("event", {
+    type = "message_end",
+    message = { role = "assistant", content = {}, stopReason = "error",
+      errorMessage = "opencode-go API error (429): usage limit exceeded" },
+  })
+  local last = entries[#entries]
+  assert(#entries == 1, "a failed turn adds one entry, not an empty answer: " .. #entries)
+  assert(last.role == "error", "an unanswered turn is not an answer: " .. tostring(last.role))
+  assert(last.text:find("usage limit exceeded", 1, true), last.text)
+end)
+
 test("a reading that leaves the changed set is reported apart from a removal", function()
   entries, mark_calls = {}, {}
   local session = Session.new("/repo", Config.options)
@@ -560,6 +577,56 @@ test("a repeated absence is reported once, and a return is reported", function()
   assert(gone_again ~= returned and gone_again.entries[1].status == "gone", "and its second absence is reported too")
 end)
 
+test("a window compares against the previous observation, not a late snapshot", function()
+  local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
+  local temp = workdir("-pair-baseline")
+  os.execute("mkdir -p " .. string.format("%q", temp))
+  local disk = {}
+  local function put(name, text)
+    local handle = assert(io.open(temp .. "/" .. name, "wb"))
+    handle:write(text)
+    handle:close()
+    disk[name] = text
+  end
+  put("a.lua", "one\n")
+  -- Every path present is dirty, which is what a working tree looks like while an
+  -- agent is working in it.
+  vim.system = function()
+    return { wait = function()
+      local names = {}
+      for name in pairs(disk) do names[#names + 1] = name end
+      table.sort(names)
+      local lines = {}
+      for _, name in ipairs(names) do lines[#lines + 1] = " M " .. name .. "\0" end
+      return { code = 0, stdout = table.concat(lines) }
+    end }
+  end
+  vim.uv = { fs_stat = function(path)
+    local text = disk[path:match("([^/]+)$")]
+    if not text then return nil end
+    return { type = "file", size = #text, mtime = { sec = 1, nsec = 1 } }
+  end }
+  local reports = {}
+  local tracker = ChangesReal.new(temp, function(entries, id) reports[#reports + 1] = { id = id, entries = entries } end)
+
+  -- Window one: the tool writes while the host is already looking.
+  tracker:before("call-1")
+  put("a.lua", "one\ntwo\n")
+  tracker:after("call-1")
+  assert(#reports == 1 and reports[1].entries[1].status == "changed",
+    reports[1] and reports[1].entries[1].status)
+
+  -- Window two: the tool finished before the host could look, so its write is on
+  -- disk before the window opens. Comparing against the previous observation is
+  -- what makes it visible at all.
+  put("b.lua", "new\n")
+  tracker:before("call-2")
+  tracker:after("call-2")
+  assert(#reports == 2, "a tool that finished before the host could look is still observed")
+  assert(reports[2].entries[1].path == "b.lua" and reports[2].entries[1].status == "new",
+    reports[2].entries[1] and (reports[2].entries[1].path .. " " .. reports[2].entries[1].status))
+end)
+
 test("abandoned checkpoints stay bounded", function()
   local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
   local temp = workdir("-pair-bound")
@@ -670,12 +737,12 @@ test("a file past the content ceiling gets a change key, not a revision", functi
   local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
   local size, clock = 3 * 1024 * 1024, 10
   vim.uv = { fs_stat = function() return { type = "file", size = size, mtime = { sec = clock, nsec = 0 } } end }
-  -- Two windows over the same large file: rewritten, then committed.
-  local outputs = { " M big.txt\0", " M big.txt\0", " M big.txt\0", "" }
-  local calls = 0
+  -- Two windows over the same large file: rewritten, then committed. The output
+  -- follows the repository state rather than the number of observations taken, so
+  -- a window that reads the state once is not mistaken for one that read it twice.
+  local committed = false
   vim.system = function()
-    calls = calls + 1
-    return { wait = function() return { code = 0, stdout = outputs[calls] } end }
+    return { wait = function() return { code = 0, stdout = committed and "" or " M big.txt\0" } end }
   end
   local observed
   local tracker = ChangesReal.new("/repo", function(entries) observed = entries end)
@@ -693,6 +760,7 @@ test("a file past the content ceiling gets a change key, not a revision", functi
   -- Committing does not touch the file, so the key does not move and nothing is
   -- claimed about the reading. This is what a stale mark must not fire on.
   tracker:before("call-2")
+  committed = true
   tracker:after("call-2")
   assert(#observed == 1, #observed)
   assert(observed[1].status == "unchanged", observed[1].status)

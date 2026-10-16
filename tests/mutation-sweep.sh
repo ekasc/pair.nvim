@@ -114,6 +114,14 @@ run_one "a dead backend is not reopened" lua/pair/init.lua \
   's/  elseif M\.session\.backend\.job then/  elseif true then/' "$INTEG"
 run_one "a dead backend is not asked" lua/pair/init.lua \
   's/  if M\.session and M\.session\.backend\.job then/  if M.session then/' "$INTEG"
+run_one "a failed turn is reported with its reason" lua/pair/session.lua \
+  's/    if event\.message\.stopReason == "error" then/    if false then/' "$LOGIC"
+run_one "an answer section opens with its first text" lua/pair/session.lua \
+  's/    self\.active_message = nil\n  elseif event\.type == "message_update" then/    self.active_message = self.ui:add("agent", "")\n  elseif event.type == "message_update" then/' "$LOGIC"
+run_one "a window compares against the previous observation" lua/pair/changes.lua \
+  's/  if type\(baseline\) ~= "table" or held\(self, baseline\) then/  if true then/' "$LOGIC"
+run_one "a window compares against the previous observation (integration)" lua/pair/changes.lua \
+  's/  if type\(baseline\) ~= "table" or held\(self, baseline\) then/  if true then/' "$INTEG"
 
 rm -rf "$work"
 if command -v git >/dev/null 2>&1 && [ "$(git status --porcelain)" != "$state_before" ]; then

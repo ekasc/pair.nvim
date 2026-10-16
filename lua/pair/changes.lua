@@ -181,7 +181,20 @@ end
 function Changes.new(root, on_change)
   return setmetatable({
     root = root, on_change = on_change, checkpoints = {}, order = {}, files = {},
+    -- The state at the previous observation, which is what the next window
+    -- compares against. See `before`.
+    baseline = nil,
   }, Changes)
+end
+
+-- Whether a snapshot is already the baseline of an open window. Two tools can be
+-- in flight at once, and each window must compare against a state that precedes
+-- it rather than sharing one the other has already moved past.
+local function held(self, taken)
+  for _, pending in ipairs(self.order) do
+    if self.checkpoints[pending] == taken then return true end
+  end
+  return false
 end
 
 function Changes:before(id)
@@ -189,9 +202,19 @@ function Changes:before(id)
   -- checkpoint either, so there is no window to open. Pi omits the id only on
   -- malformed input, and a raise here would land in the event callback.
   if id == nil then return end
-  -- `false` records that a window was opened but nothing could be seen in it, so
-  -- a host without a usable git stays quiet instead of reporting on every tool.
-  self.checkpoints[id] = snapshot(self.root) or false
+  -- The baseline is the state at the previous observation, not one taken now. Pi
+  -- reports a tool that finishes quickly by sending its start and its end
+  -- together, and by then the write is already on disk, so a snapshot taken when
+  -- the start arrives would hold the very change this window exists to report.
+  -- The first window of a session, and a tool that opens while another is still
+  -- in flight, have no shared past observation and take the state now. `false`
+  -- records that a window was opened but nothing could be seen in it, so a host
+  -- without a usable git stays quiet instead of reporting on every tool.
+  local baseline = self.baseline
+  if type(baseline) ~= "table" or held(self, baseline) then
+    baseline = snapshot(self.root) or false
+  end
+  self.checkpoints[id] = baseline
   self.order[#self.order + 1] = id
   while #self.order > MAX_CHECKPOINTS do
     -- Dropping the oldest window is reported when its tool ends: the comparison
@@ -219,6 +242,10 @@ function Changes:after(id)
   if before == false then return end
   local after, renamed = snapshot(self.root)
   if not after then return end
+  -- What this window just read becomes the baseline of the next one, so a tool
+  -- whose start and end arrive together is still compared against the state
+  -- before it ran.
+  self.baseline = after
   -- A rename moves a reading rather than ending it. The new path is compared
   -- against the reading its old path had, so the diff is computed from the right
   -- baseline and reported where the file actually is: hunks carry line numbers

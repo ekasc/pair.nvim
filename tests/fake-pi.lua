@@ -15,6 +15,9 @@ local EDIT_CONTENT = {
   "alpha\nBETA CHANGED\ngamma\n",
   "alpha\nBETA CHANGED\ngamma\ndelta\n",
   false,
+  -- Round 4 is written and reported in one flush, the way a tool that finishes
+  -- quickly arrives from a real Pi.
+  "alpha\nROUND FOUR\ngamma\n",
 }
 
 local log = assert(io.open(log_path, "ab"))
@@ -23,6 +26,22 @@ local round = 0
 local function send(record)
   io.stdout:write(record, "\n")
   io.stdout:flush()
+end
+
+-- Two records in one write, so the host reads them together.
+local function send_batch(records)
+  io.stdout:write(table.concat(records, "\n"), "\n")
+  io.stdout:flush()
+end
+
+local function edit_file(number)
+  if EDIT_CONTENT[number] == false then
+    os.remove(file)
+    return
+  end
+  local handle = assert(io.open(file, "wb"))
+  handle:write(EDIT_CONTENT[number] or ("round " .. number .. "\n"))
+  handle:close()
 end
 
 local function escape(text)
@@ -61,25 +80,29 @@ local function handle(line)
   send('{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Checking round ' .. round .. '."}}')
   send(('{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Checking round %d."}]}}'):format(round))
 
-  send(('{"type":"tool_execution_start","toolCallId":"call-%d","toolName":"write-%d"}'):format(round, round))
-  -- Block until the host answers. By then it has already taken its
-  -- before-snapshot, which makes change detection deterministic instead of
-  -- timing-dependent.
-  local gate = io.read("*l")
-  if not gate then return "closed" end
-  log:write(gate, "\n")
-  log:flush()
-  if request_type(gate) == "get_state" then respond(gate, '{"sessionId":"fake-session"}') end
+  local start_record = ('{"type":"tool_execution_start","toolCallId":"call-%d","toolName":"write-%d"}'):format(round, round)
+  local end_record = ('{"type":"tool_execution_end","toolCallId":"call-%d","toolName":"write-%d","isError":false}'):format(round, round)
 
-  if EDIT_CONTENT[round] == false then
-    os.remove(file)
+  if round <= 3 then
+    send(start_record)
+    -- Block until the host answers. By then it has already taken its
+    -- before-snapshot, which makes change detection deterministic instead of
+    -- timing-dependent.
+    local gate = io.read("*l")
+    if not gate then return "closed" end
+    log:write(gate, "\n")
+    log:flush()
+    if request_type(gate) == "get_state" then respond(gate, '{"sessionId":"fake-session"}') end
+    edit_file(round)
+    send(end_record)
   else
-    local handle = assert(io.open(file, "wb"))
-    handle:write(EDIT_CONTENT[round] or ("round " .. round .. "\n"))
-    handle:close()
+    -- A real Pi sends the start and the end of a tool that finishes quickly
+    -- together, with the write already on disk by the time the host reads them.
+    -- A host that snapshots only when the start arrives sees nothing here, so
+    -- this round has no gate and reports both events at once.
+    edit_file(round)
+    send_batch({ start_record, end_record })
   end
-
-  send(('{"type":"tool_execution_end","toolCallId":"call-%d","toolName":"write-%d","isError":false}'):format(round, round))
 
   -- The explanation arrives after the edit, so it binds to the revision that
   -- edit produced rather than the one before it.

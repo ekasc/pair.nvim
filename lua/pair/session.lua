@@ -121,10 +121,14 @@ function Session:on_event(kind, event)
     self.status = "idle"
     self.ui:add("status", event.aborted and "Agent interrupted" or "Agent idle")
   elseif event.type == "message_start" and event.message and event.message.role == "assistant" then
-    self.active_message = self.ui:add("agent", "")
+    -- The answer entry is created with the first text of the turn, not at its
+    -- start: a turn can end with no text at all, such as one a provider refused,
+    -- and an empty answer section would present that as a reply.
+    self.active_message = nil
   elseif event.type == "message_update" then
     local update = event.assistantMessageEvent or {}
-    if update.type == "text_delta" and self.active_message then
+    if update.type == "text_delta" then
+      if not self.active_message then self.active_message = self.ui:add("agent", "") end
       self.active_message.text = self.active_message.text .. (update.delta or "")
       self.ui:request_render()
     elseif update.type == "text_end" and self.active_message then
@@ -139,6 +143,15 @@ function Session:on_event(kind, event)
       self.ui:add("agent", text)
     end
     self.active_message = nil
+    -- A turn can end in a provider or model failure, which Pi reports on the
+    -- message rather than as a failed command: the prompt response says success,
+    -- the message carries stopReason "error" and the reason, and its content is
+    -- empty or partial. Without that reason the transcript would show a silence
+    -- from the model that never happened. Whatever text did arrive is still read
+    -- for decision records.
+    if event.message.stopReason == "error" then
+      self.ui:add("error", "Pi reported a failed turn: " .. (event.message.errorMessage or "no reason given"))
+    end
     for _, decision in ipairs(collect_decisions(text)) do
       -- Bind the explanation to the reading each file it names was last observed
       -- at, so a later change can be recognised as having invalidated it. The key

@@ -340,6 +340,29 @@ else
   print("SKIP removal observation: git is not installed")
 end
 
+-- Round 4 is a tool that finished before the host could look. A real Pi sends the
+-- start and the end of a fast tool together, with the write already on disk by
+-- the time the host reads them, so a window must compare against the state at the
+-- previous observation. Snapshotting when the start arrives would already contain
+-- the change and report nothing.
+prompt("A tool that returns as soon as it is done")
+check("a tool that finished before the host could look is still observed",
+  wait_for("Changes observed during tool call-4"), transcript():sub(-300))
+if has_git then
+  local batched = session.file_log["gen.lua"]
+  check("the write that arrived with its tool end is reported as a reading",
+    batched ~= nil and batched.status == "new" and batched.key ~= nil,
+    batched and ("status=" .. tostring(batched.status) .. " key=" .. tostring(batched.key)))
+  check("the absence recorded earlier no longer stands",
+    not transcript():find("(file gone)", 1, true), transcript():sub(-400))
+  pair.groups()
+  local batched_groups = vim.fn.getqflist()
+  vim.cmd("cclose")
+  check("the group counts the file now that it has been observed",
+    batched_groups[1] ~= nil and batched_groups[1].text:find("not observed", 1, true) == nil,
+    batched_groups[1] and batched_groups[1].text)
+end
+
 -- Teardown: closing stdin must end the process rather than leave it running.
 local backend = session.backend
 backend:stop()
