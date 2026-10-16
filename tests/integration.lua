@@ -25,9 +25,18 @@ local function check(name, condition, detail)
   end
 end
 
-local tmp = vim.fn.tempname()
-vim.fn.mkdir(tmp, "p")
-local wire_log = tmp .. "/wire.log"
+local real = vim.fn.tempname()
+vim.fn.mkdir(real, "p")
+-- The fixture is reached through a symlink, the way a project under /tmp, on a
+-- mounted volume or behind a symlinked home is. The editor reports a buffer's
+-- resolved name, so the root and the buffer name differ in spelling until the root
+-- is canonicalised where it is discovered.
+local tmp = real .. "-link"
+os.execute("ln -sfn " .. string.format("%q", real) .. " " .. string.format("%q", tmp))
+-- The wire log lives outside the fixture, which is a git repository the test
+-- observes: a log written inside it would itself be reported as a working-tree
+-- change, and the fixture would be measuring a repository it also edits.
+local wire_log = real .. "-wire.log"
 vim.env.FAKE_PI_FILE = tmp .. "/gen.lua"
 vim.env.FAKE_PI_LOG = wire_log
 
@@ -363,6 +372,29 @@ if has_git then
     batched_groups[1] and batched_groups[1].text)
 end
 
+-- Contextual chat: a question asked at a location in a file a decision named
+-- carries that decision and the files it named, into the prompt and onto the
+-- question itself.
+if has_git then
+  local editor_win
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if win ~= ui.input_win and win ~= ui.transcript_win then editor_win = win break end
+  end
+  vim.api.nvim_set_current_win(editor_win or 0)
+  vim.api.nvim_win_set_buf(0, genbuf)
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  pair.context()
+  vim.api.nvim_buf_set_lines(ui.input_buf, 0, -1, false, { "Why this shape?" })
+  ui:send(false)
+  check("a question about a named file keeps the decision that named it",
+    wait_for("[gen.lua:1 · decision: Round 4 decision · files: gen.lua]", 60000), transcript():sub(-300))
+  check("the reference reaches the model",
+    occurrences("A recorded decision that named this file: Round 4 decision") == 1, wire:sub(-400))
+  check("and names the files that decision held",
+    occurrences("Files that decision named: gen.lua") == 1)
+  check("the question is still the user's own text", transcript():find("## You\nWhy this shape?", 1, true) ~= nil)
+end
+
 -- Teardown: closing stdin must end the process rather than leave it running.
 local backend = session.backend
 backend:stop()
@@ -389,6 +421,8 @@ local asked = pair.session
 pair.stop()
 check("the replacement sessions are stopped", vim.wait(5000, function() return asked.backend.job == nil end, 20))
 
-vim.fn.delete(tmp, "rf")
+os.remove(tmp)
+vim.fn.delete(real, "rf")
+os.remove(wire_log)
 print(("\n%d passed, %d failed"):format(checks - failures, failures))
 if failures > 0 then vim.cmd("cquit 1") else vim.cmd("qa!") end

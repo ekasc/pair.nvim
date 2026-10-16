@@ -77,15 +77,13 @@ run_one "no sentinels in the change key" lua/pair/changes.lua \
 run_one "rename keeps the reading comparable" lua/pair/changes.lua \
   's/local moved = renamed_to and after\[renamed_to\]/local moved = nil/' "$LOGIC"
 run_one "rename publishes nothing for the old path" lua/pair/changes.lua \
-  's/^        revision = nil$/        revision = entry.revision/m' "$LOGIC"
+  's/^          revision = nil$/          revision = entry.revision/m' "$LOGIC"
 run_one "a copy is not a moved reading" lua/pair/changes.lua \
   's/    if after\[origin\] == nil then origin_of\[target\] = origin end/    origin_of[target] = origin/' "$LOGIC"
 run_one "budget favours cheap files" lua/pair/changes.lua \
   's/    if left == right then return a\.path < b\.path end\n    return left < right/    return a.path < b.path/' "$LOGIC"
 run_one "a dropped window is reported" lua/pair/changes.lua \
   's/self\.on_change\(\{\}, id, "no baseline was recorded before it ran"\)/self.on_change({}, id)/' "$LOGIC"
-run_one "a repeated absence is reported once" lua/pair/changes.lua \
-  's/      if reported == nil or reported\.status ~= state or reported\.reason ~= read_reason\(entry\) then/      if true then/' "$LOGIC"
 run_one "a commit is not a change" lua/pair/changes.lua \
   's/        elseif previous\.key == entry\.key then/        elseif false then/' "$LOGIC"
 run_one "a commit is not a change (integration)" lua/pair/changes.lua \
@@ -108,8 +106,14 @@ run_one "a group reports superseded evidence" lua/pair/groups.lua \
   's/    superseded = binding ~= nil and binding\.revised == true/    superseded = false/' "$INTEG"
 run_one "a reported path that is not readable ends its absence" lua/pair/session.lua \
   's/      self\.ui:mark_revised\(file, nil\)/      self.ui:mark_gone(file)/' "$LOGIC"
-run_one "a decision naming one path twice names one file" lua/pair/groups.lua \
-  's/        if not named_once\[path\] then/        if true then/' "$LOGIC"
+run_one "a decision names each path as the editor would" lua/pair/session.lua \
+  's/            file = vim\.fs\.normalize\(vim\.trim\(file\)\)/            file = vim.trim(file)/' "$LOGIC"
+run_one "a decision names one path once" lua/pair/session.lua \
+  's/            if file ~= "" and not seen\[file\] then/            if file ~= "" then/' "$LOGIC"
+run_one "an absence already told is not told again" lua/pair/changes.lua \
+  's/  if reported == nil or reported\.status ~= state or reported\.reason ~= read_reason\(entry\) then/  if true then/' "$LOGIC"
+run_one "a window reports nothing it cannot name" lua/pair/changes.lua \
+  's/      if status then\n        local hunks, hunks_reason, revision/      if true then\n        local hunks, hunks_reason, revision/' "$LOGIC"
 run_one "a dead backend is not reopened" lua/pair/init.lua \
   's/  elseif M\.session\.backend\.job then/  elseif true then/' "$INTEG"
 run_one "a dead backend is not asked" lua/pair/init.lua \
@@ -122,6 +126,10 @@ run_one "a window compares against the previous observation" lua/pair/changes.lu
   's/  if type\(baseline\) ~= "table" or held\(self, baseline\) then/  if true then/' "$LOGIC"
 run_one "a window compares against the previous observation (integration)" lua/pair/changes.lua \
   's/  if type\(baseline\) ~= "table" or held\(self, baseline\) then/  if true then/' "$INTEG"
+run_one "the root is one canonical name" lua/pair/init.lua \
+  's/  return vim\.uv\.fs_realpath\(path\) or vim\.fs\.normalize\(path\)/  return vim.fs.normalize(path)/' "$INTEG"
+run_one "a question keeps the decision that named its file" lua/pair/session.lua \
+  's/  if decision then\n    -- Referred to rather than copied/  if false then\n    -- Referred to rather than copied/' "$LOGIC"
 
 rm -rf "$work"
 if command -v git >/dev/null 2>&1 && [ "$(git status --porcelain)" != "$state_before" ]; then

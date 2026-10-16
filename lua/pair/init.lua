@@ -8,12 +8,23 @@ local function notify(message, level)
   vim.notify("pair.nvim: " .. message, level or vim.log.levels.INFO)
 end
 
+-- The project root as one canonical name. A directory can be reached by more than
+-- one name, such as a temporary path on macOS, where `/var` resolves to
+-- `/private/var`: the editor reports the resolved name for a buffer, so a root kept
+-- in the other spelling would never match the file the cursor is in, and a question
+-- asked there would be sent without the location it was asked at. Resolving once,
+-- where the root is discovered, keeps every later comparison between one name and
+-- the same name.
+local function canonical(path)
+  return vim.uv.fs_realpath(path) or vim.fs.normalize(path)
+end
+
 local function project_root()
   local options = Config.options
-  if options.root then return vim.fs.normalize(options.root) end
+  if options.root then return canonical(options.root) end
   local cwd = vim.fn.getcwd()
   local git_dir = vim.fs.find(".git", { upward = true, path = cwd })[1]
-  return git_dir and vim.fs.dirname(git_dir) or cwd
+  return canonical(git_dir and vim.fs.dirname(git_dir) or cwd)
 end
 
 function M.start()

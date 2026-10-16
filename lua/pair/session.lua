@@ -32,11 +32,18 @@ local function collect_decisions(text)
       local rationale = vim.trim(body:sub(first + 1, last - 1))
       local files = vim.trim(body:sub(last + 1))
       if title ~= "" and rationale ~= "" then
-        local paths = {}
+        -- One path written two ways, or named twice, is one file. The records that
+        -- compare these names against the editor's do it by exact equality, and a
+        -- buffer's path has already been normalized by then, so a "./src/a.lua"
+        -- left as written would name nothing at all.
+        local paths, seen = {}, {}
         if files ~= "-" then
           for file in files:gmatch("[^,]+") do
-            file = vim.trim(file)
-            if file ~= "" then paths[#paths + 1] = file end
+            file = vim.fs.normalize(vim.trim(file))
+            if file ~= "" and not seen[file] then
+              seen[file] = true
+              paths[#paths + 1] = file
+            end
           end
         end
         decisions[#decisions + 1] = { title = title, rationale = rationale, files = paths }
@@ -79,11 +86,31 @@ function Session:start()
   return true
 end
 
-function Session:submit(text, steer, context)
-  local message = text
-  if context then
-    message = ("Neovim location (may change during execution): %s:%d\n\n%s"):format(context.file, context.line, text)
+-- What a question is attached to, on one line for the transcript: where it was
+-- asked, and, for a file a decision named, that decision and the files the record
+-- named. The link is by name, which is the only one the plugin has.
+local function context_label(context)
+  local parts = { context.file .. ":" .. context.line }
+  if context.decision then
+    parts[#parts + 1] = "decision: " .. context.decision
+    if #(context.files or {}) > 0 then parts[#parts + 1] = "files: " .. table.concat(context.files, ", ") end
   end
+  return table.concat(parts, " · ")
+end
+
+local function context_message(context, text)
+  local message = ("Neovim location (may change during execution): %s:%d"):format(context.file, context.line)
+  if context.decision then
+    -- Named, never attributed: the record names this file, and saying so gives the
+    -- question the context the session actually holds.
+    message = message .. "\nA recorded decision that named this file: " .. context.decision
+      .. "\nFiles that decision named: " .. table.concat(context.files or {}, ", ")
+  end
+  return message .. "\n\n" .. text
+end
+
+function Session:submit(text, steer, context)
+  local message = context and context_message(context, text) or text
   if not self.initialized then
     message = Directive.build(self.config) .. "\n\n---\nUser request:\n" .. message
   end
@@ -93,7 +120,7 @@ function Session:submit(text, steer, context)
     return false
   end
   self.initialized = true
-  self.ui:add("user", text .. (context and ("\n[" .. context.file .. ":" .. context.line .. "]") or ""))
+  self.ui:add("user", text .. (context and ("\n[" .. context_label(context) .. "]") or ""))
   if command == "follow_up" then
     self.ui:add("status", "Question queued after the current run. Use <C-t> to steer at a turn boundary.")
   elseif command == "steer" then
@@ -333,8 +360,34 @@ function Session:open_file(file)
   end
 end
 
+-- The decision a question asked at `file` is about: the most recent one whose
+-- record named that file. Titles are labels, so a file named by several decisions
+-- answers with the newest, which is the one the code most likely still follows.
+-- This reads the transcript, so a decision the entry cap has pruned is no longer
+-- found, and the question then carries its location alone.
+function Session:decision_naming(file)
+  for index = #self.ui.entries, 1, -1 do
+    local entry = self.ui.entries[index]
+    if entry.role == "decision" then
+      for _, path in ipairs(entry.files or {}) do
+        if path == file then return entry end
+      end
+    end
+  end
+  return nil
+end
+
 function Session:context()
-  return buffer_context(self.root)
+  local context = buffer_context(self.root)
+  if not context then return nil end
+  local decision = self:decision_naming(context.file)
+  if decision then
+    -- Referred to rather than copied: the transcript entry is the record, and the
+    -- files it named are the ones this question is about.
+    context.decision = decision.title
+    context.files = decision.files
+  end
+  return context
 end
 
 function Session:files()

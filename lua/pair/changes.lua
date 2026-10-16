@@ -124,6 +124,21 @@ local function read_reason(entry)
   return entry.gap
 end
 
+-- The status of a path whose bytes cannot be read: "gone" when nothing is there,
+-- "unreadable" when something is but cannot be measured, and nil when the reader has
+-- already been told the same thing. Porcelain keeps listing a staged deletion in
+-- every window that follows it, and committing that deletion leaves the changed set
+-- without changing what is on disk, so both directions of the comparison ask this
+-- one question rather than one of them assuming the answer.
+local function unread_state(changes, path, entry)
+  local reported = changes.files[path]
+  local state = entry.gap == "gone" and "gone" or "unreadable"
+  if reported == nil or reported.status ~= state or reported.reason ~= read_reason(entry) then
+    return state
+  end
+  return nil
+end
+
 local function snapshot(root)
   local paths, renamed = git_paths(root)
   if not paths then return nil end
@@ -264,13 +279,8 @@ function Changes:after(id)
     if entry.key == nil then
       -- Gone, a directory, a submodule, a file that cannot be opened: there is
       -- nothing to compare, so the state is news when the reader has not been
-      -- told it. Porcelain keeps listing a staged deletion in every window that
-      -- follows it, and a directory stays a directory.
-      local reported = self.files[path]
-      local state = entry.gap == "gone" and "gone" or "unreadable"
-      if reported == nil or reported.status ~= state or reported.reason ~= read_reason(entry) then
-        status = state
-      end
+      -- told it.
+      status = unread_state(self, path, entry)
     elseif previous == nil or previous.key == nil then
       status = "new"
     elseif previous.key ~= entry.key then
@@ -312,10 +322,12 @@ function Changes:after(id)
         entry = moved
       else
         entry = reading_of(full)
-        if entry.gap == "gone" then
-          status = "gone"
-        elseif entry.key == nil then
-          status = "unreadable"
+        if entry.key == nil then
+          -- Nothing can be read at the path, so the same absence is not news when
+          -- the reader has already been told it: committing a deletion takes the
+          -- path out of the changed set while leaving the disk as it was, and
+          -- reporting it again would date the removal to the commit.
+          status = unread_state(self, path, entry)
         elseif previous.key == nil then
           status = "new"
         elseif previous.key == entry.key then
@@ -325,23 +337,27 @@ function Changes:after(id)
         end
       end
       -- Hunks and the content hash describe the new path when a rename moved
-      -- them, so neither is published under this one.
-      local hunks, hunks_reason, revision = {}, nil, entry.revision
-      if moved then
-        revision = nil
-      else
-        hunks, hunks_reason = diff_pair(previous, entry)
+      -- them, so neither is published under this one. No status means the path has
+      -- left the changed set without saying anything the reader does not already
+      -- have, and an entry is only added for a state worth reporting.
+      if status then
+        local hunks, hunks_reason, revision = {}, nil, entry.revision
+        if moved then
+          revision = nil
+        else
+          hunks, hunks_reason = diff_pair(previous, entry)
+        end
+        observed[#observed + 1] = {
+          path = path,
+          status = status,
+          reason = read_reason(entry),
+          renamed_to = moved and renamed_to or nil,
+          key = entry.key,
+          revision = revision,
+          hunks = hunks,
+          hunks_reason = hunks_reason,
+        }
       end
-      observed[#observed + 1] = {
-        path = path,
-        status = status,
-        reason = read_reason(entry),
-        renamed_to = moved and renamed_to or nil,
-        key = entry.key,
-        revision = revision,
-        hunks = hunks,
-        hunks_reason = hunks_reason,
-      }
     end
   end
   table.sort(observed, function(a, b) return a.path < b.path end)

@@ -31,14 +31,8 @@ function Groups.build(decisions, file_log)
     local named = decision.files or {}
     if #named > 0 then
       local group = { title = decision.title, files = {} }
-      local named_once = {}
       for _, path in ipairs(named) do
-        -- A decision that names one path twice names one file. Counting it twice
-        -- would report a second file and a second copy of the same hunks.
-        if not named_once[path] then
-          named_once[path] = true
-          group.files[#group.files + 1] = Groups.file(path, file_log[path], decision.bindings and decision.bindings[path])
-        end
+        group.files[#group.files + 1] = Groups.file(path, file_log[path], decision.bindings and decision.bindings[path])
         claimed[path] = true
       end
       groups[#groups + 1] = group

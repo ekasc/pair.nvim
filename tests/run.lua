@@ -70,6 +70,16 @@ vim = {
     chanclose = function() return 1 end,
     sha256 = function(s) return "hash-" .. tostring(#s) .. ":" .. s end,
   },
+  -- Enough of Neovim's path normalization for the tests that parse a decision:
+  -- duplicate separators, "." segments and a trailing separator collapse, and
+  -- nothing else moves.
+  fs = {
+    normalize = function(path)
+      local out = path:gsub("//+", "/"):gsub("/%./", "/"):gsub("^%./", "")
+      out = out:gsub("/$", "")
+      return out
+    end,
+  },
 }
 
 local successes, failures = 0, 0
@@ -389,7 +399,7 @@ test("observed changes are grouped under the decisions that name their files", f
     ["zz.lua"] = { path = "zz.lua", status = "changed", key = "rev-4", revision = "rev-4", hunks = {} },
   }
   local decisions = {
-    { title = "Atomic updates", files = { "src/a.lua", "src/never.lua", "src/a.lua" },
+    { title = "Atomic updates", files = { "src/a.lua", "src/never.lua" },
       bindings = { ["src/a.lua"] = { key = "rev-1", revision = "rev-1", revised = true } } },
     { title = "Queueing", files = { "src/a.lua" },
       bindings = { ["src/a.lua"] = { key = "rev-2", revision = "rev-2" } } },
@@ -400,8 +410,7 @@ test("observed changes are grouped under the decisions that name their files", f
   assert(#groups == 2, "groups: " .. #groups)
   assert(groups[1].title == "Atomic updates", tostring(groups[1].title))
   -- One file can be named by more than one decision. Each group reports it and
-  -- reports its own binding for it rather than a shared verdict. A decision that
-  -- names one path twice names one file, so it is counted once with its hunks.
+  -- reports its own binding for it rather than a shared verdict.
   assert(#groups[1].files == 2 and #groups[2].files == 1, "files per group")
   assert(groups[1].files[1].entry == log["src/a.lua"], "the group refers to the reading itself")
   assert(groups[1].files[1].superseded == true, "the mark of the decision that moved")
@@ -441,6 +450,70 @@ test("a decision labels the group of changes it names", function()
   local moved = session:groups()
   assert(moved[1].files[1].superseded == true, "the moved reading is reported")
   assert(moved[1].files[2].superseded == false, "only the bound file is marked")
+end)
+
+test("a question asked in a file keeps the decision that named it", function()
+  entries, sent = {}, {}
+  local session = Session.new("/repo", Config.options)
+  session.file_log["src/a.lua"] = { path = "src/a.lua", status = "changed", key = "rev-1", revision = "rev-1" }
+  session:on_event("event", {
+    type = "message_end",
+    message = { role = "assistant", content = { { type = "text",
+      text = "PAIR_DECISION: Atomic updates | Prevent competing writes | src/a.lua, tests/concurrency.lua" } } },
+  })
+  -- The editor surface the cursor sits in, stubbed down to what buffer_context
+  -- reads: a named buffer inside the root and a cursor line.
+  vim.api = {
+    nvim_get_current_buf = function() return 7 end,
+    nvim_buf_get_name = function() return "/repo/src/a.lua" end,
+    nvim_win_get_cursor = function() return { 12, 0 } end,
+  }
+  vim.bo = { [7] = { buftype = "" } }
+
+  local context = session:context()
+  assert(context and context.file == "src/a.lua" and context.line == 12,
+    context and (context.file .. ":" .. tostring(context.line)) or "no context")
+  assert(context.decision == "Atomic updates", tostring(context.decision))
+  assert(table.concat(context.files, ",") == "src/a.lua,tests/concurrency.lua", table.concat(context.files, ","))
+
+  -- The model receives the same references, named as what they are.
+  session.backend.job = 123
+  session:submit("Why this order?", false, context)
+  assert(sent[1]:find("A recorded decision that named this file: Atomic updates", 1, true), sent[1])
+  assert(sent[1]:find("Files that decision named: src/a.lua, tests/concurrency.lua", 1, true), sent[1])
+
+  -- And the question in the transcript keeps them, so a reader can tell what it
+  -- was asked about after the fact.
+  local question = entries[#entries]
+  assert(question.role == "user", tostring(question.role))
+  assert(question.text:find("[src/a.lua:12 · decision: Atomic updates · files: src/a.lua, tests/concurrency.lua]", 1, true),
+    question.text)
+
+  -- A file no decision named is asked about with its location alone.
+  vim.api.nvim_buf_get_name = function() return "/repo/src/lonely.lua" end
+  local alone = session:context()
+  assert(alone and alone.decision == nil and alone.files == nil,
+    alone and (tostring(alone.decision) .. " / " .. tostring(alone.files)) or "no context")
+
+  vim.api, vim.bo = nil, nil
+end)
+
+test("a decision record names each path as the editor would", function()
+  entries = {}
+  local session = Session.new("/repo", Config.options)
+  session.file_log["src/a.lua"] = { path = "src/a.lua", status = "changed", key = "rev-1", revision = "rev-1" }
+  -- The same file, once written with a leading "./" and once written twice. Both
+  -- are compared against paths the editor has already normalized, so a name left
+  -- as the model typed it would link to nothing.
+  session:on_event("event", {
+    type = "message_end",
+    message = { role = "assistant", content = { { type = "text",
+      text = "PAIR_DECISION: Dot | why it matters | ./src/a.lua, src/a.lua, src/b.lua/" } } },
+  })
+  local decision = entries[#entries]
+  assert(table.concat(decision.files, ",") == "src/a.lua,src/b.lua", table.concat(decision.files, ","))
+  assert(decision.bindings["src/a.lua"] ~= nil, "the normalized path binds the reading it names")
+  assert(decision.bindings["src/a.lua"].key == "rev-1", tostring(decision.bindings["src/a.lua"].key))
 end)
 
 -- Exercise the actual NUL-delimited Git scanner using synthetic status output
@@ -546,8 +619,9 @@ test("a repeated absence is reported once, and a return is reported", function()
   on_disk:close()
   -- Porcelain keeps listing a staged deletion until it is committed, so the same
   -- absence is visible in every window that follows it.
+  local staged = true
   vim.system = function()
-    return { wait = function() return { code = 0, stdout = " D gone.lua\0" } end }
+    return { wait = function() return { code = 0, stdout = staged and " D gone.lua\0" or "" } end }
   end
   local state = "absent"
   vim.uv = { fs_stat = function()
@@ -568,13 +642,16 @@ test("a repeated absence is reported once, and a return is reported", function()
   local first = window("w1")
   assert(first and first.entries[1].status == "gone", "an absence is reported when it is new")
   assert(window("w2") == first, "and is not reported again in the next window")
-  -- Coming back is reported when a window sees it come back. A restore that
-  -- happens between two windows is invisible to both of them: the tracker
-  -- compares the start of a window with its end, and neither saw the transition.
+  -- Coming back is reported when a window sees it come back.
   local returned = window("w3", function() state = "present" end)
   assert(returned ~= first and returned.entries[1].status == "new", "a file that comes back is a new reading")
   local gone_again = window("w4", function() state = "absent" end)
   assert(gone_again ~= returned and gone_again.entries[1].status == "gone", "and its second absence is reported too")
+  -- Committing the deletion takes the path out of the changed set while leaving the
+  -- disk as it was, so it is a second view of the absence the reader already has,
+  -- not a second absence. Reporting it again would date the removal to the commit.
+  assert(window("w5", function() staged = false end) == gone_again,
+    "committing a removal reports nothing new about it")
 end)
 
 test("a window compares against the previous observation, not a late snapshot", function()
