@@ -778,6 +778,38 @@ test("a rename after the work was accepted is still a rename", function()
   assert(renamed["a.lua"].key == renamed["b.lua"].key, "the reading stays comparable across the move")
 end)
 
+test("a decision that names no files says so the way the directive asks", function()
+  entries = {}
+  local session = Session.new("/repo", Config.options)
+  -- The directive asks the model to write `->` for a decision that names no files.
+  -- Taken as a path, that becomes a file called "->": a link in the transcript to a
+  -- file nobody has, and a question about it that tells the model "->".
+  session:on_event("event", {
+    type = "message_end",
+    message = { role = "assistant", content = { { type = "text",
+      text = "PAIR_DECISION: Nothing to name | it only explains | ->" } } },
+  })
+  local decision = entries[#entries]
+  assert(decision.role == "decision", tostring(decision.role))
+  assert(#decision.files == 0, table.concat(decision.files, ","))
+  assert(#session:decisions() == 1, "the record is still kept")
+end)
+
+test("text that streamed is not replaced by an empty end", function()
+  entries = {}
+  local session = Session.new("/repo", Config.options)
+  session:on_event("event", { type = "message_start", message = { role = "assistant", content = {} } })
+  session:on_event("event", { type = "message_update", assistantMessageEvent = { type = "text_delta", delta = "half a sentence" } })
+  session:on_event("event", { type = "message_end", message = { role = "assistant", content = {} } })
+  assert(entries[#entries].role == "agent" and entries[#entries].text == "half a sentence",
+    ("%s / %q"):format(entries[#entries].role, entries[#entries].text))
+  -- A turn with nothing streamed and nothing at the end still opens no section.
+  entries = {}
+  session:on_event("event", { type = "message_start", message = { role = "assistant", content = {} } })
+  session:on_event("event", { type = "message_end", message = { role = "assistant", content = {} } })
+  assert(#entries == 0, "an empty turn adds no answer section: " .. #entries)
+end)
+
 test("abandoned checkpoints stay bounded", function()
   local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
   local temp = workdir("-pair-bound")

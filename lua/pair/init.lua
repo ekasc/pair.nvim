@@ -150,16 +150,26 @@ local function plural(count, singular)
   return ("%d %s%s"):format(count, singular, count == 1 and "" or "s")
 end
 
+-- A reading that found nothing to read is not a location. {1:valid = 0} only keeps the
+-- `:cnext` family away, and Neovim loads an empty buffer for a path that does not
+-- exist, so an item that pointed at one would move the reader to a file they never
+-- had.
+local function openable(entry)
+  return entry.status ~= "gone" and entry.status ~= "unreadable" and entry.status ~= "renamed"
+end
+
 -- Items for one file: one per hunk, so each is a jump target, or a single item
--- saying what the reading knows when there is no diff to point at.
+-- saying what the reading knows when there is nothing to point at.
 local function add_file_items(items, root, path, entry, note)
-  local filename = root .. "/" .. path
-  if not entry then
-    -- A decision may name a file no observation has covered. There is no reading
-    -- to point at, so the item says that instead of offering a location.
-    items[#items + 1] = { filename = filename, lnum = 0, valid = 0, text = "no observation has covered this file" }
+  if not entry or not openable(entry) then
+    -- A decision may name a file no observation has covered, and an observation may
+    -- find nothing readable at the path. Neither is a location, so the item says
+    -- what it knows without pointing anywhere.
+    local text = entry and item_text(entry) or "no observation has covered this file"
+    items[#items + 1] = { text = text .. note }
     return
   end
+  local filename = root .. "/" .. path
   if #entry.hunks == 0 then
     items[#items + 1] = { filename = filename, lnum = 1, text = item_text(entry) .. note }
     return

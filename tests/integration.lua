@@ -333,24 +333,53 @@ if has_git then
   vim.cmd("cclose")
   local removed_item
   for _, item in ipairs(removed_qf) do
-    if item.bufnr == vim.fn.bufnr(generated) then removed_item = item end
+    if item.text == "no longer on disk" then removed_item = item end
   end
   check("the quickfix reports the removal without inventing a diff",
-    removed_item and removed_item.text == "no longer on disk", removed_item and removed_item.text)
+    removed_item ~= nil and removed_item.text == "no longer on disk", removed_item and removed_item.text)
+  check("and a removed file offers no location to jump to",
+    removed_item ~= nil and removed_item.bufnr == 0 and removed_item.valid == 0,
+    removed_item and ("bufnr=" .. removed_item.bufnr .. " valid=" .. removed_item.valid) or "no item")
 
   -- An absent file's own reading already says it is absent, so the group item for
-  -- it does not say so twice.
+  -- it does not say so twice, and it points nowhere because there is nowhere to go.
   pair.groups()
   local gone_groups = vim.fn.getqflist()
   vim.cmd("cclose")
   local gone_group_item
   for _, item in ipairs(gone_groups) do
-    if item.bufnr == vim.fn.bufnr(generated) then gone_group_item = item break end
+    if item.text == "no longer on disk" then gone_group_item = item break end
   end
   check("a group item for an absent file reports the absence once",
     gone_group_item ~= nil and gone_group_item.text == "no longer on disk", gone_group_item and gone_group_item.text)
+  check("and the group item for it points nowhere either",
+    gone_group_item ~= nil and gone_group_item.bufnr == 0, gone_group_item and tostring(gone_group_item.bufnr))
 else
   print("SKIP removal observation: git is not installed")
+end
+
+-- A decision may name a file that no observation ever covered. The item says so and
+-- points nowhere: Neovim would load an empty buffer for a path that does not exist.
+if has_git then
+  session:on_event("event", {
+    type = "message_end",
+    message = { role = "assistant", content = { { type = "text",
+      text = "PAIR_DECISION: Never observed | a path no tool ever touched | never-seen.lua" } } },
+  })
+  pair.groups()
+  local never_groups = vim.fn.getqflist()
+  vim.cmd("cclose")
+  local never_item
+  for _, item in ipairs(never_groups) do
+    if item.text == "no observation has covered this file" then never_item = item end
+  end
+  check("an unobserved file is listed as unobserved",
+    never_item ~= nil, table.concat(vim.tbl_map(function(item) return item.text end, never_groups), " | "))
+  check("and it offers no location to jump to",
+    never_item ~= nil and never_item.bufnr == 0 and never_item.valid == 0,
+    never_item and ("bufnr=" .. never_item.bufnr .. " valid=" .. never_item.valid) or "no item")
+  check("and asking for the view created no buffer for it",
+    vim.fn.bufexists(tmp .. "/never-seen.lua") == 0)
 end
 
 -- Round 4 is a tool that finished before the host could look. A real Pi sends the

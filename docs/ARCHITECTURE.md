@@ -50,7 +50,7 @@ Observation {
   revision,           -- the content hash, published only when the bytes were read and no rename moved them
   renamed_to,         -- the new path, when Git reported the rename
   hunks: [{old_start, old_count, new_start, new_count}],
-  hunks_reason,       -- why a diff is missing: budget | too_large | gone | not_a_file
+  hunks_reason,       -- why a diff is missing: budget | too_large | gone | not_a_file | unreadable
 }
 ```
 
@@ -66,7 +66,7 @@ Hunk ranges would go stale as later edits move code, so they are never reused ac
 
 ### Change groups
 
-`lua/pair/groups.lua` joins the two records into one view. A change group is one stated decision plus the files it names, each shown with the reading it was last observed at. A decision that names no files holds no change, so it gets no group. The group holds no state of its own: it refers to the observation entry rather than copying it, so it cannot drift from the reading it points at, and it reports the decision's binding as superseded or gone instead of deciding staleness a second time. The decision's title is kept as a field of the transcript entry for this, because the entry body is the rationale a reader sees and a group header needs the label alone.
+`lua/pair/groups.lua` joins the two records into one view. A change group is one stated decision plus the files it names, each shown with the reading it was last observed at. A decision that names no files holds no change, so it gets no group. The directive asks the model to end such a record's path list with `->`, and a single `-` means the same thing; both are read as naming nothing, rather than as a file called `->`. The group holds no state of its own: it refers to the observation entry rather than copying it, so it cannot drift from the reading it points at, and it reports the decision's binding as superseded or gone instead of deciding staleness a second time. The decision's title is kept as a field of the transcript entry for this, because the entry body is the rationale a reader sees and a group header needs the label alone.
 
 A group header says what the group holds: files, hunks, and how much of that evidence no longer matches the decision. An item for a file whose binding moved carries that mark, so a hunk listed under a decision is not read as the reading that decision described. A file no observation covered is listed with that fact, because a decision naming a file nothing measured is a gap worth seeing, and it offers no location to jump to, since nothing at it was measured. Observed paths no decision names are listed in a final section rather than dropped, so this view never hides a change it cannot place. The transcript is capped, so a decision the entry cap has pruned stops naming its files, and those files fall into that final section.
 

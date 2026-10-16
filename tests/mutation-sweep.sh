@@ -144,6 +144,12 @@ run_one "a rename after the work was accepted is still a rename" lua/pair/change
   's/    if before\[origin\] == nil and after\[origin\] == nil and after\[target\] ~= nil then/    if false then/' "$LOGIC"
 run_one "a buffer is resolved by name, not by pattern" lua/pair/session.lua \
   's/    if vim\.api\.nvim_buf_get_name\(candidate\) == path then return candidate end/    return vim.fn.bufnr(path)/' "$INTEG"
+run_one "a path with nothing at it is not a location" lua/pair/init.lua \
+  's/  if not entry or not openable\(entry\) then/  if not entry then/' "$INTEG"
+run_one "a decision with no files is read as one" lua/pair/session.lua \
+  's/        if files ~= "-" and files ~= "->" then/        if files ~= "-" then/' "$LOGIC"
+run_one "an empty end does not erase streamed text" lua/pair/session.lua \
+  's/      if text ~= "" or self\.active_message\.text == "" then/      if true then/' "$LOGIC"
 
 rm -rf "$work"
 if command -v git >/dev/null 2>&1 && [ "$(git status --porcelain)" != "$state_before" ]; then

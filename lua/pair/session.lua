@@ -37,7 +37,10 @@ local function collect_decisions(text)
         -- buffer's path has already been normalized by then, so a "./src/a.lua"
         -- left as written would name nothing at all.
         local paths, seen = {}, {}
-        if files ~= "-" then
+        -- A decision that names no files ends its list with `->`, which is what the
+        -- directive asks the model to write. A single dash was accepted before that
+        -- wording and is still accepted, because both mean one thing: no files.
+        if files ~= "-" and files ~= "->" then
           for file in files:gmatch("[^,]+") do
             file = vim.fs.normalize(vim.trim(file))
             if file ~= "" and not seen[file] then
@@ -165,7 +168,13 @@ function Session:on_event(kind, event)
   elseif event.type == "message_end" and event.message and event.message.role == "assistant" then
     local text = extract_text(event.message)
     if self.active_message then
-      self.active_message.text = text
+      -- message_end is authoritative for the text of the turn. An empty end after
+      -- text has already streamed is not a correction to nothing: it would replace
+      -- what the model did say with a bare answer heading, which is the empty
+      -- section this entry was created late to avoid.
+      if text ~= "" or self.active_message.text == "" then
+        self.active_message.text = text
+      end
     elseif text ~= "" then
       self.ui:add("agent", text)
     end
