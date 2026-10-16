@@ -130,6 +130,20 @@ run_one "the root is one canonical name" lua/pair/init.lua \
   's/  return vim\.uv\.fs_realpath\(path\) or vim\.fs\.normalize\(path\)/  return vim.fs.normalize(path)/' "$INTEG"
 run_one "a question keeps the decision that named its file" lua/pair/session.lua \
   's/  if decision then\n    -- Referred to rather than copied/  if false then\n    -- Referred to rather than copied/' "$LOGIC"
+run_one "a send leaves the user where they were" lua/pair/ui.lua \
+  's/  if focused and self\.input_win and vim\.api\.nvim_win_is_valid\(self\.input_win\) then/  if self.input_win and vim.api.nvim_win_is_valid(self.input_win) then/' "$INTEG"
+run_one "a growing transcript does not move a reader" lua/pair/ui.lua \
+  's/  local should_follow = cursor\[1\] >= old_count - 2/  local should_follow = true/' "$INTEG"
+run_one "a question while the agent works is queued" lua/pair/pi.lua \
+  's/  if self\.busy then/  if false then/' "$INTEG"
+run_one "a redirect is sent as a steer" lua/pair/pi.lua \
+  's/    command = behavior == "steer" and "steer" or "follow_up"/    command = "follow_up"/' "$INTEG"
+run_one "an interruption is reported as one" lua/pair/session.lua \
+  's/    self\.ui:add\("status", event\.aborted and "Agent interrupted" or "Agent idle"\)/    self.ui:add("status", "Agent idle")/' "$INTEG"
+run_one "a rename after the work was accepted is still a rename" lua/pair/changes.lua \
+  's/    if before\[origin\] == nil and after\[origin\] == nil and after\[target\] ~= nil then/    if false then/' "$LOGIC"
+run_one "a buffer is resolved by name, not by pattern" lua/pair/session.lua \
+  's/    if vim\.api\.nvim_buf_get_name\(candidate\) == path then return candidate end/    return vim.fn.bufnr(path)/' "$INTEG"
 
 rm -rf "$work"
 if command -v git >/dev/null 2>&1 && [ "$(git status --porcelain)" != "$state_before" ]; then

@@ -70,9 +70,11 @@ vim = {
     chanclose = function() return 1 end,
     sha256 = function(s) return "hash-" .. tostring(#s) .. ":" .. s end,
   },
-  -- Enough of Neovim's path normalization for the tests that parse a decision:
-  -- duplicate separators, "." segments and a trailing separator collapse, and
-  -- nothing else moves.
+  -- Enough of Neovim's buffer list for the buffer lookup the observer does, and of
+  -- its path normalization for the tests that parse a decision.
+  api = {
+    nvim_list_bufs = function() return {} end,
+  },
   fs = {
     normalize = function(path)
       local out = path:gsub("//+", "/"):gsub("/%./", "/"):gsub("^%./", "")
@@ -462,8 +464,11 @@ test("a question asked in a file keeps the decision that named it", function()
       text = "PAIR_DECISION: Atomic updates | Prevent competing writes | src/a.lua, tests/concurrency.lua" } } },
   })
   -- The editor surface the cursor sits in, stubbed down to what buffer_context
-  -- reads: a named buffer inside the root and a cursor line.
+  -- reads: a named buffer inside the root and a cursor line. The base api stub is
+  -- restored afterwards, since later tests observe files through it.
+  local saved_api, saved_bo = vim.api, vim.bo
   vim.api = {
+    nvim_list_bufs = saved_api.nvim_list_bufs,
     nvim_get_current_buf = function() return 7 end,
     nvim_buf_get_name = function() return "/repo/src/a.lua" end,
     nvim_win_get_cursor = function() return { 12, 0 } end,
@@ -495,7 +500,7 @@ test("a question asked in a file keeps the decision that named it", function()
   assert(alone and alone.decision == nil and alone.files == nil,
     alone and (tostring(alone.decision) .. " / " .. tostring(alone.files)) or "no context")
 
-  vim.api, vim.bo = nil, nil
+  vim.api, vim.bo = saved_api, saved_bo
 end)
 
 test("a decision record names each path as the editor would", function()
@@ -702,6 +707,75 @@ test("a window compares against the previous observation, not a late snapshot", 
   assert(#reports == 2, "a tool that finished before the host could look is still observed")
   assert(reports[2].entries[1].path == "b.lua" and reports[2].entries[1].status == "new",
     reports[2].entries[1] and (reports[2].entries[1].path .. " " .. reports[2].entries[1].status))
+end)
+
+test("a rename after the work was accepted is still a rename", function()
+  local ChangesReal = dofile(root .. "/lua/pair/changes.lua")
+  local temp = workdir("-pair-rename")
+  os.execute("mkdir -p " .. string.format("%q", temp))
+  local disk = {}
+  local function put(name, text)
+    local handle = assert(io.open(temp .. "/" .. name, "wb"))
+    handle:write(text)
+    handle:close()
+    disk[name] = text
+  end
+  local function remove(name)
+    os.remove(temp .. "/" .. name)
+    disk[name] = nil
+  end
+  put("a.lua", "one\ntwo\nthree\n")
+  -- Porcelain follows the repository: one dirty file, nothing once the work is
+  -- accepted, and then git's own report of the move.
+  local dirty, moved = false, false
+  vim.system = function()
+    return { wait = function()
+      if moved then return { code = 0, stdout = "R  b.lua\0a.lua\0" } end
+      if dirty then return { code = 0, stdout = " M a.lua\0" } end
+      return { code = 0, stdout = "" }
+    end }
+  end
+  vim.uv = { fs_stat = function(path)
+    local text = disk[path:match("([^/]+)$")]
+    if not text then return nil end
+    return { type = "file", size = #text, mtime = { sec = 1, nsec = 1 } }
+  end }
+  local reports = {}
+  local tracker = ChangesReal.new(temp, function(entries, id) reports[#reports + 1] = { id = id, entries = entries } end)
+  local function window(id, mutate)
+    tracker:before(id)
+    if mutate then mutate() end
+    tracker:after(id)
+    local last = reports[#reports]
+    local map = {}
+    if last and last.id == id then
+      for _, entry in ipairs(last.entries) do map[entry.path] = entry end
+    end
+    return map
+  end
+
+  local edited = window("w1", function()
+    dirty = true
+    put("a.lua", "one\nTWO\nthree\n")
+  end)
+  assert(edited["a.lua"] and edited["a.lua"].status == "new", edited["a.lua"] and edited["a.lua"].status)
+  local accepted = window("w2", function() dirty = false end)
+  assert(accepted["a.lua"] and accepted["a.lua"].status == "unchanged", accepted["a.lua"] and accepted["a.lua"].status)
+
+  -- The old path left the changed set when the work was accepted, so it is in
+  -- neither the baseline nor this window's changed set. Git still reported the
+  -- move, and the reader still holds the reading it was given.
+  local renamed = window("w3", function()
+    moved = true
+    put("b.lua", "one\nTWO\nthree\n")
+    remove("a.lua")
+  end)
+  assert(renamed["a.lua"] ~= nil, "the path the file moved from is reported")
+  assert(renamed["a.lua"].status == "renamed", tostring(renamed["a.lua"].status))
+  assert(renamed["a.lua"].renamed_to == "b.lua", tostring(renamed["a.lua"].renamed_to))
+  assert(renamed["a.lua"].revision == nil, "the new file's hash is not published under the old path")
+  assert(renamed["b.lua"] ~= nil, "the path it moved to is reported too")
+  assert(renamed["a.lua"].key == renamed["b.lua"].key, "the reading stays comparable across the move")
 end)
 
 test("abandoned checkpoints stay bounded", function()

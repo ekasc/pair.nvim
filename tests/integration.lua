@@ -39,6 +39,10 @@ os.execute("ln -sfn " .. string.format("%q", real) .. " " .. string.format("%q",
 local wire_log = real .. "-wire.log"
 vim.env.FAKE_PI_FILE = tmp .. "/gen.lua"
 vim.env.FAKE_PI_LOG = wire_log
+-- Rounds 6 and 7 hold their turns open, so the agent is still working while the
+-- user types: that is the state queueing and steering are about. A real Pi holds a
+-- turn open for as long as a model takes; the fake holds when asked.
+vim.env.FAKE_PI_HOLD = "6,7"
 
 local has_git = vim.fn.executable("git") == 1
 if has_git then vim.system({ "git", "-C", tmp, "init", "-q" }):wait(5000) end
@@ -71,9 +75,9 @@ local function wait_for(text, ms)
   return vim.wait(ms or 8000, function() return transcript():find(text, 1, true) ~= nil end, 20)
 end
 
-local function prompt(text)
+local function prompt(text, steer)
   vim.api.nvim_buf_set_lines(ui.input_buf, 0, -1, false, { text })
-  ui:send(false)
+  ui:send(steer or false)
 end
 
 -- Gate the fake's file write on our own observation of the tool starting, so
@@ -394,6 +398,139 @@ if has_git then
     occurrences("Files that decision named: gen.lua") == 1)
   check("the question is still the user's own text", transcript():find("## You\nWhy this shape?", 1, true) ~= nil)
 end
+
+-- Non-disruptive execution. While a turn is open, a question is queued rather
+-- than interrupting, an explicit steer redirects the run without aborting it, and
+-- none of it moves the user: the window, the buffer, the cursor and the view stay
+-- where they were put.
+if has_git then
+  -- An editor window: not either half of the sidebar. The checks below are about
+  -- this window not moving, so it has to be found rather than assumed.
+  local function editor_window()
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      if win ~= ui.input_win and win ~= ui.transcript_win then return win end
+    end
+  end
+  local function focus_snapshot()
+    local win = vim.api.nvim_get_current_win()
+    local buf = vim.api.nvim_get_current_buf()
+    local cursor = vim.api.nvim_win_get_cursor(win)
+    return ("%s|%s|%d:%d|%d"):format(tostring(win), vim.api.nvim_buf_get_name(buf),
+      cursor[1], cursor[2], vim.fn.line("w0"))
+  end
+  local function request_kinds(from)
+    local kinds = {}
+    local file = vim.fn.readfile(wire_log)
+    for index = from + 1, #file do
+      local kind = file[index]:match('"type"%s*:%s*"([%a_]+)"')
+      if kind then kinds[#kinds + 1] = kind end
+    end
+    return table.concat(kinds, ",")
+  end
+
+  -- Put the editor back on gen.lua holding what is on disk, with a known cursor.
+  local editor = editor_window()
+  check("the fixture has an editor window to sit in", editor ~= nil)
+  vim.api.nvim_set_current_win(editor or 0)
+  vim.api.nvim_win_set_buf(0, genbuf)
+  check("the cursor is in the editor window, not the sidebar",
+    vim.api.nvim_get_current_win() == editor and vim.api.nvim_get_current_buf() == genbuf)
+  vim.cmd("silent! edit!")
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  local mark = #vim.fn.readfile(wire_log)
+  local resting = focus_snapshot()
+
+  prompt("A round the agent has not finished")
+  check("the held round reports its tool", wait_for("Running write-6", 60000), transcript():sub(-200))
+  check("the agent is working while the user types", session.backend.busy == true)
+  check("the observation of a held round does not move the user", focus_snapshot() == resting,
+    focus_snapshot() .. " expected " .. resting)
+  check("the rewritten file is reloaded under the cursor", buffer_text(genbuf):find("round 6", 1, true) ~= nil,
+    buffer_text(genbuf))
+
+  prompt("First question while it works")
+  check("a question while the agent works is queued after the run",
+    wait_for("Question queued after the current run", 60000), transcript():sub(-300))
+  prompt("Second question while it works")
+  check("the queue does not move the user", focus_snapshot() == resting, focus_snapshot())
+  prompt("A redirect while it works", true)
+  check("an explicit steer is reported as steering", wait_for("Steering request queued", 60000),
+    transcript():sub(-300))
+  check("the three requests reached Pi in the order they were written",
+    request_kinds(mark) == "prompt,follow_up,follow_up,steer", request_kinds(mark))
+  check("a steer did not abort the run", not request_kinds(mark):find("abort", 1, true), request_kinds(mark))
+
+  -- A send from anywhere else is checked above by the focus snapshots, which is
+  -- what makes them worth having: a check written for the composer case alone
+  -- passes with or without the rule, because restoring focus to the window that
+  -- already has it changes nothing.
+
+  session.backend:send({ type = "get_state" })
+  check("the held round finishes when the agent is done", wait_for("Working on round 6.", 60000))
+
+  -- An explicit interruption is its own action: it ends the turn and says so.
+  vim.api.nvim_set_current_win(editor or 0)
+  vim.api.nvim_win_set_buf(0, genbuf)
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  local before_interrupt = focus_snapshot()
+  local interrupt_mark = #vim.fn.readfile(wire_log)
+  prompt("A round that will be interrupted")
+  check("the interrupted round reports its tool", wait_for("Running write-7", 60000), transcript():sub(-200))
+  pair.interrupt()
+  check("an explicit interruption is reported", wait_for("Agent interrupted", 60000), transcript():sub(-300))
+  check("the interruption reached Pi as an abort", request_kinds(interrupt_mark) == "prompt,abort",
+    request_kinds(interrupt_mark))
+  check("interrupting does not move the user", focus_snapshot() == before_interrupt,
+    focus_snapshot() .. " expected " .. before_interrupt)
+  session.backend:send({ type = "get_state" })
+  vim.wait(500)
+
+  -- A reader part-way up the transcript keeps their place while it grows.
+  vim.api.nvim_set_current_win(ui.transcript_win)
+  vim.api.nvim_win_set_cursor(ui.transcript_win, { 1, 0 })
+  local reader = focus_snapshot()
+  ui:add("status", "A line the reader did not ask for")
+  vim.wait(300)
+  check("a growing transcript does not move a reader", focus_snapshot() == reader,
+    focus_snapshot() .. " expected " .. reader)
+end
+
+-- A file name with a glob character in it, beside a file its name would expand to.
+-- bufnr() matches its argument as a pattern, so the buffer lookup has to resolve
+-- the name rather than trust the match: otherwise the observation reloads and
+-- marks the wrong buffer and leaves the file it observed stale.
+local appdir = tmp .. "/app"
+vim.fn.mkdir(appdir, "p")
+local bracketed_path = appdir .. "/[id].lua"
+local sibling_path = appdir .. "/i.lua"
+local function fill(path, text)
+  local handle = assert(io.open(path, "wb"))
+  handle:write(text)
+  handle:close()
+end
+fill(bracketed_path, "alpha\n")
+fill(sibling_path, "one\n")
+local bracketed_buf = vim.fn.bufadd(bracketed_path)
+vim.fn.bufload(bracketed_buf)
+local sibling_buf = vim.fn.bufadd(sibling_path)
+vim.fn.bufload(sibling_buf)
+fill(bracketed_path, "BETA\n")
+session:refresh_buffer("app/[id].lua", {
+  path = "app/[id].lua",
+  status = "changed",
+  key = "k",
+  revision = vim.fn.sha256("BETA\n"),
+  hunks = { { old_start = 1, old_count = 1, new_start = 1, new_count = 1 } },
+})
+check("a file whose name holds a glob character reloads its own buffer",
+  buffer_text(bracketed_buf) == "BETA\n", buffer_text(bracketed_buf))
+check("and its marks land in that buffer",
+  #vim.api.nvim_buf_get_extmarks(bracketed_buf, require("pair.marks").namespace(), 0, -1, {}) > 0)
+check("the sibling its name expands to is left alone",
+  buffer_text(sibling_buf) == "one\n" and
+    #vim.api.nvim_buf_get_extmarks(sibling_buf, require("pair.marks").namespace(), 0, -1, {}) == 0,
+  buffer_text(sibling_buf) .. " marks: " ..
+    #vim.api.nvim_buf_get_extmarks(sibling_buf, require("pair.marks").namespace(), 0, -1, {}))
 
 -- Teardown: closing stdin must end the process rather than leave it running.
 local backend = session.backend

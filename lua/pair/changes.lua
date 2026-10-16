@@ -360,6 +360,25 @@ function Changes:after(id)
       end
     end
   end
+  -- A rename whose old path had already left the changed set: the loop above walks
+  -- the baseline, and this path is not in it, so nothing would report the move and
+  -- a reader would keep being told that the old path holds the reading. Git did
+  -- report it, and the last reading the reader was given is what the move keeps
+  -- comparable, because the bytes did not change when the name did.
+  for origin, target in pairs(renamed or {}) do
+    if before[origin] == nil and after[origin] == nil and after[target] ~= nil then
+      local known = self.files[origin]
+      observed[#observed + 1] = {
+        path = origin,
+        status = "renamed",
+        renamed_to = target,
+        key = known and known.key or nil,
+        revision = nil,
+        hunks = {},
+        hunks_reason = nil,
+      }
+    end
+  end
   table.sort(observed, function(a, b) return a.path < b.path end)
   for _, entry in ipairs(observed) do self.files[entry.path] = entry end
   if #observed > 0 and self.on_change then self.on_change(observed, id) end

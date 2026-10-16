@@ -289,9 +289,20 @@ function Session:files_changed(entries, tool_id, unavailable)
   if self.follow and #entries > 0 then self:open_file(entries[#entries].path) end
 end
 
+-- The buffer holding this file, found by name rather than by pattern. `bufnr()`
+-- matches its argument as a glob, so a file called `a[1].lua` resolves to `a1.lua`
+-- when both are open: the observation would then reload and mark a buffer holding
+-- another file, leaving the file it did observe stale.
+local function buffer_for(path)
+  for _, candidate in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(candidate) == path then return candidate end
+  end
+  return -1
+end
+
 function Session:refresh_buffer(file, entry)
   local full = self.root .. "/" .. file
-  local bufnr = vim.fn.bufnr(full)
+  local bufnr = buffer_for(full)
   if bufnr == -1 or not vim.api.nvim_buf_is_loaded(bufnr) then return end
   if vim.bo[bufnr].modified then
     self.ui:add("status", "Unsaved buffer conflicts with disk change: " .. file)

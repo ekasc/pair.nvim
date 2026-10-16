@@ -4,9 +4,15 @@
 -- Environment:
 --   FAKE_PI_FILE  file the fake writes during each tool call
 --   FAKE_PI_LOG   append-only log of every request the host sent us
+--   FAKE_PI_HOLD  rounds whose tool end is followed by a hold, comma-separated:
+--                 the fake keeps the turn open and answers whatever the host
+--                 sends until a get_state asks for state, which is how a real Pi
+--                 looks while a model is still working and the user keeps typing
 
 local file = assert(os.getenv("FAKE_PI_FILE"), "FAKE_PI_FILE is not set")
 local log_path = assert(os.getenv("FAKE_PI_LOG"), "FAKE_PI_LOG is not set")
+local hold_rounds = {}
+for number in (os.getenv("FAKE_PI_HOLD") or ""):gmatch("%d+") do hold_rounds[tonumber(number)] = true end
 
 -- Round-specific content so the expected hunk offsets are fixed, not emergent.
 -- A round mapped to false removes the file instead of writing it, which is how a
@@ -102,6 +108,28 @@ local function handle(line)
     -- this round has no gate and reports both events at once.
     edit_file(round)
     send_batch({ start_record, end_record })
+  end
+
+  -- The turn is not finished: a model is still working while the user keeps
+  -- typing. Requests arriving now are logged and acknowledged, and an abort ends
+  -- the turn the way Pi ends one.
+  if hold_rounds[round] then
+    while true do
+      local request = io.read("*l")
+      if not request then return "closed" end
+      log:write(request, "\n")
+      log:flush()
+      local kind = request_type(request)
+      if kind == "get_state" then
+        respond(request, '{"sessionId":"fake-session"}')
+        break
+      end
+      if kind == "abort" then
+        send('{"type":"agent_settled","aborted":true}')
+        return "aborted"
+      end
+      respond(request, '{"disposition":"queued"}')
+    end
   end
 
   -- The explanation arrives after the edit, so it binds to the revision that

@@ -108,6 +108,11 @@ end
 
 function Ui:send(steer)
   if not self.input_buf or not vim.api.nvim_buf_is_valid(self.input_buf) then return end
+  -- Where the user was when they asked to send. A send from the composer's own
+  -- keys keeps the composer focused; a send issued from a code window leaves the
+  -- cursor where the user was reading, because the message was the request and
+  -- moving the view is not.
+  local focused = vim.api.nvim_get_current_win() == self.input_win
   local lines = vim.api.nvim_buf_get_lines(self.input_buf, 0, -1, false)
   local value = table.concat(lines, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
   if value == "" then return end
@@ -117,7 +122,7 @@ function Ui:send(steer)
   end
   vim.api.nvim_buf_set_lines(self.input_buf, 0, -1, false, { "" })
   self.context = nil
-  if self.input_win and vim.api.nvim_win_is_valid(self.input_win) then
+  if focused and self.input_win and vim.api.nvim_win_is_valid(self.input_win) then
     vim.api.nvim_set_current_win(self.input_win)
     vim.cmd("startinsert")
   end
